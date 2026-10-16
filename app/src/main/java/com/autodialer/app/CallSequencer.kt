@@ -1,0 +1,149 @@
+package com.autodialer.app
+
+/**
+ * Pure state machine for sequential dialing. No Android dependencies here on purpose,
+ * so it can be unit tested directly on the JVM (see CallSequencerTest).
+ *
+ * The single most important guarantee this class provides:
+ *   A CALL_ENDED signal (even if delivered twice due to duplicate phone-state events)
+ *   can only cause the sequence to advance ONCE.
+ */
+class CallSequencer(val total: Int) {
+
+    enum class Status { PENDING, CALLING, COMPLETED, SKIPPED }
+
+    val statuses = MutableList(total) { Status.PENDING }
+
+    var currentIndex = -1
+        private set
+    var paused = false
+        private set
+    var stopped = false
+        private set
+    var callActive = false
+        private set
+
+    /** Begins the session. Returns the index to dial, or null if nothing to dial. */
+    fun start(): Int? {
+        stopped = false
+        paused = false
+        currentIndex = nextPending(-1)
+        return tryBeginCall()
+    }
+
+    private fun tryBeginCall(): Int? {
+        if (stopped || paused) return null
+        if (callActive) return null // guard: never start a second call while one is active
+        if (currentIndex == -1) return null
+        callActive = true
+        statuses[currentIndex] = Status.CALLING
+        return currentIndex
+    }
+
+    /**
+     * Call when the phone truly transitioned OFFHOOK -> IDLE for the active call.
+     * Returns true exactly once for a real call end; returns false for any
+     * duplicate/spurious event (e.g. a second IDLE broadcast for the same call).
+     */
+    fun onCallEnded(): Boolean {
+        if (!callActive) return false
+        callActive = false
+        if (currentIndex in statuses.indices) statuses[currentIndex] = Status.COMPLETED
+        return true
+    }
+
+    /**
+     * Call after the post-call delay elapses to move to the next number and dial it.
+     * Returns the index to dial, or null if paused/stopped/finished.
+     */
+    fun advance(): Int? {
+        if (stopped || paused) return null
+        currentIndex = nextPending(currentIndex)
+        return tryBeginCall()
+    }
+
+    fun pause() {
+        paused = true
+    }
+
+    /** Resumes a paused session. Returns index to dial now, or null (e.g. a call is still active). */
+    fun resume(): Int? {
+        if (!paused) return null
+        paused = false
+        if (callActive) return null // will continue naturally when the active call ends
+        return advance()
+    }
+
+    fun stop() {
+        stopped = true
+        paused = false
+        callActive = false
+    }
+
+    /**
+     * Continues the sequence from wherever it currently is (whether it was paused
+     * or stopped), skipping any number that's already COMPLETED/SKIPPED. Never
+     * re-dials a number that already has a final status. Safe no-op if a call is
+     * still actively in progress.
+     */
+    fun continueSequence(): Int? {
+        if (callActive) return null
+        stopped = false
+        paused = false
+        return advance()
+    }
+
+    /** Skips the current pending/waiting number. Cannot skip a call that is actively in progress. */
+    fun skip(): Int? {
+        if (callActive) return null
+        if (currentIndex in statuses.indices && statuses[currentIndex] == Status.PENDING) {
+            statuses[currentIndex] = Status.SKIPPED
+        } else if (currentIndex in statuses.indices) {
+            statuses[currentIndex] = Status.SKIPPED
+        }
+        return advance()
+    }
+
+    /**
+     * Used by the engine's final duplicate-call safety check: marks the current index as
+     * SKIPPED (without ever having actually dialed it) and moves straight to the next pending
+     * number. Unlike advance(), this doesn't require the call to have "ended" first - there
+     * was no real call here to end.
+     */
+    fun autoSkipCurrentAndAdvance(): Int? {
+        if (currentIndex in statuses.indices) statuses[currentIndex] = Status.SKIPPED
+        callActive = false
+        if (stopped || paused) return null
+        currentIndex = nextPending(currentIndex)
+        return tryBeginCall()
+    }
+
+    /**
+     * Emergency self-heal: forces the sequencer to treat [index] as the number now being
+     * called, regardless of whatever internal state it was in before. This is only used when
+     * the engine detects that its own bookkeeping disagrees with the real lead list (the
+     * actual source of truth) - it guarantees a list can never be abandoned or marked
+     * "complete" while a number in it is still genuinely pending, no matter what caused the
+     * disagreement in the first place.
+     */
+    fun forceCallingAt(index: Int): Int? {
+        if (index !in statuses.indices) return null
+        stopped = false
+        paused = false
+        currentIndex = index
+        callActive = true
+        statuses[index] = Status.CALLING
+        return index
+    }
+
+    fun nextPending(from: Int): Int {
+        for (i in (from + 1) until total) {
+            if (statuses[i] == Status.PENDING) return i
+        }
+        return -1
+    }
+
+    fun isComplete(): Boolean = currentIndex == -1 && !callActive
+
+    fun counts(): Map<Status, Int> = Status.values().associateWith { s -> statuses.count { it == s } }
+}
