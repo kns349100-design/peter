@@ -174,5 +174,35 @@
                 android:id="@+id/rowBattery"/>
         </LinearLayout>
 
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="Account"
+            android:textColor="@color/pricing_text_dark"
+            android:textSize="20sp"
+            android:textStyle="bold"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="14dp"
+            android:text="Sign out to log in with a different number"
+            android:textColor="@color/pricing_text_gray"
+            android:textSize="13sp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_pricing_section"
+            android:padding="8dp"
+            android:layout_marginBottom="24dp">
+
+            <include layout="@layout/row_settings_item"
+                android:id="@+id/rowLogout"/>
+        </LinearLayout>
+
     </LinearLayout>
 </ScrollView>

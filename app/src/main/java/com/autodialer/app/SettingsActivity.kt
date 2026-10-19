@@ -58,6 +58,32 @@ class SettingsActivity : AppCompatActivity() {
         setupRow(binding.rowBattery, "🔋", "Keep App Running", "Stop the phone from closing this app mid-list") {
             requestIgnoreBatteryOptimizations()
         }
+
+        setupRow(binding.rowLogout, "🚪", "Log out", accountSubtitle()) {
+            confirmLogout()
+        }
+    }
+
+    private fun accountSubtitle(): String {
+        val phone = AuthManager(this).phoneNumber()
+        return if (phone.isBlank()) "Sign out of this phone" else "Signed in as "
+    }
+
+    /** Lets you reach the login screen again (e.g. to log in with another number). */
+    private fun confirmLogout() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Log out?")
+            .setMessage("You will have to log in again with an OTP. Your plan stays safe on this phone.")
+            .setPositiveButton("Log out") { _, _ -> doLogout() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun doLogout() {
+        AuthManager(this).logout()
+        val intent = Intent(this, LoginActivity::class.java)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        startActivity(intent)
     }
 
     override fun onResume() {
