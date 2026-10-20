@@ -150,7 +150,7 @@ function cashfreeHeaders() {
 function handleCreatePaymentLink(e) {
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   var planType = cleanInput(e.parameter.planType, 20).toUpperCase();
-  var phone = cleanInput(e.parameter.phone, 20);
+  var phone = cleanInput(e.parameter.phone, 100);
 
   if (!deviceId || !planType) {
     return jsonResponse({ status: 'error', message: 'missing params' });
@@ -683,7 +683,7 @@ function findUserRow(sheet, phone) {
  * instant can never both register a different PIN as "the" PIN, and so a
  * failed-attempt counter can never be double-counted or skipped. */
 function handleLogin(e) {
-  var phone = cleanInput(e.parameter.phone, 20);
+  var phone = cleanInput(e.parameter.phone, 100);
   var pin = cleanInput(e.parameter.pin, 10);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
 
@@ -736,29 +736,46 @@ function handleLogin(e) {
 }
 
 /**
- * ---- Phone number + OTP login (free: the SMS is sent from YOUR OWN phone's SIM) ----
- * Uses the open-source "SMS Gateway for Android" app (cloud relay api.sms-gate.app, free, no signup).
- * Script Properties needed: SMSGATE_USER, SMSGATE_PASS (shown inside the SMS Gateway app under
- * "Cloud Server"). See OTP_SETUP.md.
+ * ---- Login with MOBILE NUMBER or EMAIL + one-time code ----
  *
- * The OTP is generated and checked only here on the server (kept 10 minutes in the script cache,
- * stored hashed). One number = one device: a correct OTP writes this device's id as the number's
- * ActiveDeviceId, so any other device logged in with that number is signed out the next time it
+ * The person types either a 10-digit mobile number or an email address. We send a 6-digit code:
+ *   - to an EMAIL address  -> sent by this script through your Gmail (MailApp). Completely free, no
+ *     extra phone or app needed. (Gmail allows roughly 100 emails a day for a normal @gmail.com account.)
+ *   - to a MOBILE number   -> sent as an SMS from YOUR OWN phone's SIM through the free open-source
+ *     "SMS Gateway for Android" app (Script Properties SMSGATE_USER / SMSGATE_PASS). Optional.
+ *
+ * The code is generated and checked only here on the server (kept 10 minutes in the script cache,
+ * stored hashed). ONE ACCOUNT = ONE DEVICE: a correct code writes this device's id as the account's
+ * ActiveDeviceId, so any other device logged into the same number/email is signed out the next time it
  * checks its session (handleCheckSession).
  *
- * Abuse / SIM protection: 60 s between OTPs per number, 5 per number per hour, 10 per device per
- * hour, and a global cap (kept under a normal SIM's daily SMS limit so the SIM never gets blocked).
- * A wrong code is allowed 5 tries per OTP.
+ * Abuse protection: 60 s between codes per account, 5 per account per hour, 10 per device per hour, and a
+ * global cap per channel (kept under Gmail's / a SIM's daily sending limit). A wrong code gets 5 tries.
  */
 var OTP_TTL_SECONDS = 600;
 var OTP_MAX_VERIFY_ATTEMPTS = 5;
 var OTP_RESEND_COOLDOWN_SECONDS = 60;
-var OTP_MAX_PER_PHONE_PER_HOUR = 5;
+var OTP_MAX_PER_ACCOUNT_PER_HOUR = 5;
 var OTP_MAX_PER_DEVICE_PER_HOUR = 10;
-var OTP_MAX_GLOBAL_PER_6H = 30;
+var OTP_MAX_SMS_PER_6H = 30;     // a SIM usually allows ~100 SMS a day
+var OTP_MAX_EMAIL_PER_6H = 40;   // Gmail allows ~100 emails a day
 
-function otpHash(phone, otp) {
-  return hashPin(phone + ':' + otp);
+/** Turns what the user typed into {type:'phone'|'email', id} (id is the normalised account key), or null. */
+function parseLoginId(raw) {
+  var v = String(raw == null ? '' : raw).trim();
+  if (v.indexOf('@') !== -1) {
+    var email = v.toLowerCase();
+    if (email.length <= 100 && /^[a-z0-9._%+\-]+@[a-z0-9\-]+(\.[a-z0-9\-]+)*\.[a-z]{2,}$/.test(email)) {
+      return { type: 'email', id: email };
+    }
+    return null;
+  }
+  if (/^\+91[6-9][0-9]{9}$/.test(v)) return { type: 'phone', id: v };
+  return null;
+}
+
+function otpHash(id, otp) {
+  return hashPin(id + ':' + otp);
 }
 
 function randomOtp() {
@@ -779,7 +796,7 @@ function bumpCounter(cache, key, ttlSeconds) {
   cache.put(key, String(readCounter(cache, key) + 1), ttlSeconds);
 }
 
-/** Sends the SMS through the SMS Gateway app running on your phone. Returns true if accepted. */
+/** Sends the code by SMS through the SMS Gateway app running on your phone. Returns true if accepted. */
 function sendOtpSms(user, pass, phone, otp) {
   try {
     var res = UrlFetchApp.fetch('https://api.sms-gate.app/3rdparty/v1/message', {
@@ -802,7 +819,31 @@ function sendOtpSms(user, pass, phone, otp) {
   }
 }
 
-/** Run this once from the Apps Script editor (after editing the number) to check the SMS setup. */
+/** Sends the code by email through your Gmail. Free. Returns true if Gmail accepted it. */
+function sendOtpEmail(email, otp) {
+  try {
+    MailApp.sendEmail({
+      to: email,
+      subject: 'Your CallConnect login code: ' + otp,
+      body: 'Your CallConnect login code is ' + otp + '.\n\nIt is valid for 10 minutes. Do not share it with anyone.\n' +
+            'If you did not ask for this code, you can ignore this email.',
+      name: 'CallConnect'
+    });
+    return true;
+  } catch (err) {
+    console.error('Email send failed: ' + err);
+    return false;
+  }
+}
+
+/** Run this once from the Apps Script editor: it asks you to allow "send email", and mails you a test. */
+function testEmail() {
+  var me = Session.getEffectiveUser().getEmail();
+  MailApp.sendEmail(me, 'CallConnect test', 'Email sending works. Remaining emails today: ' + MailApp.getRemainingDailyQuota());
+  Logger.log('Test email sent to ' + me + '. Remaining quota today: ' + MailApp.getRemainingDailyQuota());
+}
+
+/** Optional: put your own number in, select this function and Run to test the SMS Gateway setup. */
 function testSmsGateway() {
   var props = PropertiesService.getScriptProperties();
   var ok = sendOtpSms(props.getProperty('SMSGATE_USER'), props.getProperty('SMSGATE_PASS'), '+91XXXXXXXXXX', '123456');
@@ -810,94 +851,101 @@ function testSmsGateway() {
 }
 
 function handleSendOtp(e) {
-  var phone = cleanInput(e.parameter.phone, 20);
+  var who = parseLoginId(e.parameter.id || e.parameter.phone);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!/^\+91[6-9][0-9]{9}$/.test(phone) || !deviceId) {
-    return jsonResponse({ status: 'error', message: 'Enter a valid 10-digit mobile number' });
+  if (!who || !deviceId) {
+    return jsonResponse({ status: 'error', message: 'Enter a valid 10-digit mobile number or an email address' });
   }
-  var props = PropertiesService.getScriptProperties();
-  var smsUser = props.getProperty('SMSGATE_USER');
-  var smsPass = props.getProperty('SMSGATE_PASS');
-  if (!smsUser || !smsPass) {
-    return jsonResponse({ status: 'error', message: 'SMS service is not configured yet' });
+  var smsUser = null, smsPass = null;
+  if (who.type === 'phone') {
+    var props = PropertiesService.getScriptProperties();
+    smsUser = props.getProperty('SMSGATE_USER');
+    smsPass = props.getProperty('SMSGATE_PASS');
+    if (!smsUser || !smsPass) {
+      return jsonResponse({ status: 'error', message: 'Mobile OTP is not set up yet - please log in with your email instead' });
+    }
   }
 
   return withLock(function () {
     var cache = CacheService.getScriptCache();
     var now = Date.now();
-    var otpKey = 'otp_' + phone;
+    var otpKey = 'otp_' + who.id;
 
     var existing = cache.get(otpKey);
     if (existing) {
       var prev = JSON.parse(existing);
       var waitS = OTP_RESEND_COOLDOWN_SECONDS - Math.floor((now - prev.sentAt) / 1000);
       if (waitS > 0) {
-        return jsonResponse({ status: 'error', message: 'Please wait ' + waitS + ' sec before requesting another OTP' });
+        return jsonResponse({ status: 'error', message: 'Please wait ' + waitS + ' sec before requesting another code' });
       }
     }
-    if (readCounter(cache, 'otpcnt_p_' + phone) >= OTP_MAX_PER_PHONE_PER_HOUR) {
-      return jsonResponse({ status: 'error', message: 'Too many OTP requests for this number. Try again after some time.' });
+    if (readCounter(cache, 'otpcnt_p_' + who.id) >= OTP_MAX_PER_ACCOUNT_PER_HOUR) {
+      return jsonResponse({ status: 'error', message: 'Too many code requests for this account. Try again after some time.' });
     }
     if (readCounter(cache, 'otpcnt_d_' + deviceId) >= OTP_MAX_PER_DEVICE_PER_HOUR) {
-      return jsonResponse({ status: 'error', message: 'Too many OTP requests from this device. Try again after some time.' });
+      return jsonResponse({ status: 'error', message: 'Too many code requests from this device. Try again after some time.' });
     }
-    if (readCounter(cache, 'otpcnt_g') >= OTP_MAX_GLOBAL_PER_6H) {
-      return jsonResponse({ status: 'error', message: 'OTP service is busy right now. Please try again later.' });
+    var globalKey = 'otpcnt_g_' + who.type;
+    var globalCap = who.type === 'email' ? OTP_MAX_EMAIL_PER_6H : OTP_MAX_SMS_PER_6H;
+    if (readCounter(cache, globalKey) >= globalCap) {
+      return jsonResponse({ status: 'error', message: 'Login codes are busy right now. Please try again later.' });
     }
 
     var otp = randomOtp();
-    if (!sendOtpSms(smsUser, smsPass, phone, otp)) {
-      return jsonResponse({ status: 'error', message: 'Could not send the OTP SMS. Please try again in a minute.' });
+    var sent = who.type === 'email' ? sendOtpEmail(who.id, otp) : sendOtpSms(smsUser, smsPass, who.id, otp);
+    if (!sent) {
+      return jsonResponse({ status: 'error', message: 'Could not send the code. Please try again in a minute.' });
     }
 
-    cache.put(otpKey, JSON.stringify({ h: otpHash(phone, otp), sentAt: now, attempts: 0 }), OTP_TTL_SECONDS);
-    bumpCounter(cache, 'otpcnt_p_' + phone, 3600);
+    cache.put(otpKey, JSON.stringify({ h: otpHash(who.id, otp), sentAt: now, attempts: 0 }), OTP_TTL_SECONDS);
+    bumpCounter(cache, 'otpcnt_p_' + who.id, 3600);
     bumpCounter(cache, 'otpcnt_d_' + deviceId, 3600);
-    bumpCounter(cache, 'otpcnt_g', 21600);
-    return jsonResponse({ status: 'ok', resendAfter: OTP_RESEND_COOLDOWN_SECONDS });
+    bumpCounter(cache, globalKey, 21600);
+    return jsonResponse({ status: 'ok', channel: who.type, resendAfter: OTP_RESEND_COOLDOWN_SECONDS });
   });
 }
 
 function handleVerifyOtp(e) {
-  var phone = cleanInput(e.parameter.phone, 20);
+  var who = parseLoginId(e.parameter.id || e.parameter.phone);
   var otp = cleanInput(e.parameter.otp, 10);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!/^\+91[6-9][0-9]{9}$/.test(phone) || !/^[0-9]{6}$/.test(otp) || !deviceId) {
-    return jsonResponse({ status: 'error', message: 'Enter the 6-digit OTP' });
+  if (!who || !/^[0-9]{6}$/.test(otp) || !deviceId) {
+    return jsonResponse({ status: 'error', message: 'Enter the 6-digit code' });
   }
 
   return withLock(function () {
     var cache = CacheService.getScriptCache();
-    var otpKey = 'otp_' + phone;
+    var otpKey = 'otp_' + who.id;
     var raw = cache.get(otpKey);
     if (!raw) {
-      return jsonResponse({ status: 'error', message: 'OTP expired or not requested. Please request a new OTP.' });
+      return jsonResponse({ status: 'error', message: 'Code expired or not requested. Please request a new code.' });
     }
     var rec = JSON.parse(raw);
     var now = Date.now();
 
-    if (rec.h !== otpHash(phone, otp)) {
+    if (rec.h !== otpHash(who.id, otp)) {
       rec.attempts = (rec.attempts || 0) + 1;
       if (rec.attempts >= OTP_MAX_VERIFY_ATTEMPTS) {
         cache.remove(otpKey);
-        return jsonResponse({ status: 'error', message: 'Too many wrong attempts. Please request a new OTP.' });
+        return jsonResponse({ status: 'error', message: 'Too many wrong attempts. Please request a new code.' });
       }
       var ttlLeft = OTP_TTL_SECONDS - Math.floor((now - rec.sentAt) / 1000);
       if (ttlLeft < 1) {
         cache.remove(otpKey);
-        return jsonResponse({ status: 'error', message: 'OTP expired. Please request a new OTP.' });
+        return jsonResponse({ status: 'error', message: 'Code expired. Please request a new code.' });
       }
       cache.put(otpKey, JSON.stringify(rec), ttlLeft);
-      return jsonResponse({ status: 'error', message: 'Wrong OTP (' + (OTP_MAX_VERIFY_ATTEMPTS - rec.attempts) + ' tries left)' });
+      return jsonResponse({ status: 'error', message: 'Wrong code (' + (OTP_MAX_VERIFY_ATTEMPTS - rec.attempts) + ' tries left)' });
     }
 
-    cache.remove(otpKey); // one-time: this OTP can never be used again
+    cache.remove(otpKey); // one-time: this code can never be used again
 
-    // Correct OTP - this device becomes the one and only active device for this number.
+    // Correct code. A new number/email is signed up automatically; an existing one just logs in.
+    // Either way THIS device becomes the one and only active device for the account.
     var sheet = getUsersSheet();
-    var rowNum = findUserRow(sheet, phone);
+    var rowNum = findUserRow(sheet, who.id);
     if (rowNum === -1) {
-      sheet.appendRow([safeCell(phone), '', safeCell(deviceId), now, 0, 0]);
+      sheet.appendRow([safeCell(who.id), '', safeCell(deviceId), now, 0, 0]);
       return jsonResponse({ status: 'ok', registered: true });
     }
     sheet.getRange(rowNum, 3, 1, 4).setValues([[safeCell(deviceId), now, 0, 0]]);
@@ -906,7 +954,7 @@ function handleVerifyOtp(e) {
 }
 
 function handleResetPin(e) {
-  var phone = cleanInput(e.parameter.phone, 20);
+  var phone = cleanInput(e.parameter.phone, 100);
   var newPin = cleanInput(e.parameter.newPin, 10);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
 
@@ -933,7 +981,7 @@ function handleResetPin(e) {
 }
 
 function handleCheckSession(e) {
-  var phone = cleanInput(e.parameter.phone, 20);
+  var phone = cleanInput(e.parameter.phone, 100);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!phone || !deviceId) {
     return jsonResponse({ status: 'error', message: 'missing params' });
@@ -967,7 +1015,7 @@ var TRIAL_DEVICE_HEADERS = ['DeviceId', 'Phone', 'StartedAt'];
  *    RESUMED with its original start time - it is never restarted or extended.
  */
 function handleStartTrial(e) {
-  var phone = cleanInput(e.parameter.phone, 20);
+  var phone = cleanInput(e.parameter.phone, 100);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!phone || !deviceId) {
     return jsonResponse({ status: 'error', message: 'missing params' });
@@ -1021,7 +1069,7 @@ function handleStartTrial(e) {
 
 /** Lets a freshly installed / newly logged-in app learn whether this number already has a trial. */
 function handleTrialInfo(e) {
-  var phone = cleanInput(e.parameter.phone, 20);
+  var phone = cleanInput(e.parameter.phone, 100);
   if (!phone) return jsonResponse({ status: 'error', message: 'missing phone' });
   var sheet = getUsersSheet();
   var rowNum = findUserRow(sheet, phone);
