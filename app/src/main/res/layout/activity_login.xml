@@ -29,7 +29,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
-            android:text="Log in"
+            android:text="Log in / Sign up"
             android:textColor="#16213E"
             android:textStyle="bold"
             android:textSize="24sp"/>
@@ -38,47 +38,23 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="with Phone Number + OTP"
+            android:text="with Mobile Number or Email"
             android:textColor="#8A8FA3"
             android:textSize="13sp"/>
 
-        <LinearLayout
+        <EditText
+            android:id="@+id/etPhone"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
             android:layout_marginTop="32dp"
-            android:gravity="center_vertical"
             android:background="@drawable/bg_login_input"
-            android:padding="4dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:paddingStart="12dp"
-                android:paddingEnd="8dp"
-                android:text="&#127470;&#127475; +91"
-                android:textColor="#16213E"
-                android:textSize="15sp"/>
-
-            <View
-                android:layout_width="1dp"
-                android:layout_height="24dp"
-                android:background="#E3E8F2"/>
-
-            <EditText
-                android:id="@+id/etPhone"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:inputType="phone"
-                android:maxLength="10"
-                android:hint="Phone number"
-                android:textColor="#16213E"
-                android:textColorHint="#B0B5C4"
-                android:background="@android:color/transparent"
-                android:padding="14dp"
-                android:textSize="15sp"/>
-        </LinearLayout>
+            android:hint="Mobile number or email"
+            android:inputType="textEmailAddress"
+            android:maxLength="100"
+            android:padding="16dp"
+            android:textColor="#16213E"
+            android:textColorHint="#B0B5C4"
+            android:textSize="15sp"/>
 
         <TextView
             android:id="@+id/btnSendOtp"
@@ -88,7 +64,7 @@
             android:background="@drawable/bg_login_button"
             android:gravity="center"
             android:padding="16dp"
-            android:text="Send OTP"
+            android:text="Send code"
             android:textColor="#FFFFFF"
             android:textStyle="bold"
             android:textSize="16sp"/>
@@ -107,7 +83,7 @@
                 android:layout_height="wrap_content"
                 android:background="@drawable/bg_login_input"
                 android:gravity="center"
-                android:hint="6-digit OTP"
+                android:hint="6-digit code"
                 android:inputType="number"
                 android:maxLength="6"
                 android:padding="14dp"
@@ -141,7 +117,7 @@
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
                     android:padding="8dp"
-                    android:text="Change number"
+                    android:text="Change"
                     android:textColor="#6C63FF"
                     android:textSize="14sp"/>
 
@@ -151,7 +127,7 @@
                     android:layout_height="wrap_content"
                     android:padding="8dp"
                     android:gravity="end"
-                    android:text="Resend OTP"
+                    android:text="Resend code"
                     android:textColor="#6C63FF"
                     android:textSize="14sp"/>
             </LinearLayout>
@@ -171,7 +147,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:gravity="center"
-            android:text="An OTP will be sent to your number by SMS. One number can be logged in on one device at a time."
+            android:text="New here? Your account is created automatically after you enter the code. One account can be logged in on one device at a time."
             android:textColor="#B0B5C4"
             android:textSize="12sp"/>
 

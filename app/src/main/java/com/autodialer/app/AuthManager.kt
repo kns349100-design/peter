@@ -10,8 +10,8 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * Phone number + OTP login. The OTP SMS is sent and checked by the Google Apps Script backend
- * (see backend/Code.gs and OTP_SETUP.md); this app never generates or sees the OTP itself.
+ * Mobile number or email + one-time code login. The OTP SMS is sent and checked by the Google Apps Script backend
+ * (see backend/Code.gs and LOGIN_SETUP.md); this app never generates or sees the OTP itself.
  *  - Logging in with a correct OTP makes this device the ONLY active device for the number -
  *    any other device that was logged in gets signed out (detected via
  *    checkSessionInBackground, called periodically while the app is open).
@@ -35,7 +35,7 @@ class AuthManager(private val context: Context) {
         prefs.edit().clear().apply()
     }
 
-    /** Asks the backend to SMS a 6-digit OTP to the phone number (+91XXXXXXXXXX). */
+    /** Asks the backend to send a 6-digit code to the account id - a mobile number (+91XXXXXXXXXX, by SMS) or an email address (by email). */
     fun sendOtp(phone: String, onResult: (success: Boolean, message: String) -> Unit) {
         if (SubscriptionManager.SCRIPT_URL.startsWith("PASTE_")) {
             onResult(false, "Backend not set up yet - follow backend/SETUP.md")
@@ -44,7 +44,7 @@ class AuthManager(private val context: Context) {
         Thread {
             try {
                 val url = "${SubscriptionManager.SCRIPT_URL}?action=sendOtp" +
-                    "&phone=${URLEncoder.encode(phone, "UTF-8")}" +
+                    "&id=${URLEncoder.encode(phone, "UTF-8")}" +
                     "&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}"
                 val json = JSONObject(httpGet(url))
                 if (json.optString("status") == "ok") {
@@ -58,7 +58,7 @@ class AuthManager(private val context: Context) {
         }.start()
     }
 
-    /** Checks the OTP. On success this device becomes the number's only active device. */
+    /** Checks the code. On success this device becomes the account's only active device. */
     fun verifyOtp(phone: String, otp: String, onResult: (success: Boolean, message: String) -> Unit) {
         if (SubscriptionManager.SCRIPT_URL.startsWith("PASTE_")) {
             onResult(false, "Backend not set up yet - follow backend/SETUP.md")
@@ -67,7 +67,7 @@ class AuthManager(private val context: Context) {
         Thread {
             try {
                 val url = "${SubscriptionManager.SCRIPT_URL}?action=verifyOtp" +
-                    "&phone=${URLEncoder.encode(phone, "UTF-8")}" +
+                    "&id=${URLEncoder.encode(phone, "UTF-8")}" +
                     "&otp=${URLEncoder.encode(otp, "UTF-8")}" +
                     "&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}"
                 val json = JSONObject(httpGet(url))
@@ -96,7 +96,7 @@ class AuthManager(private val context: Context) {
         Thread {
             try {
                 val url = "${SubscriptionManager.SCRIPT_URL}?action=checkSession" +
-                    "&phone=${URLEncoder.encode(phone, "UTF-8")}" +
+                    "&id=${URLEncoder.encode(phone, "UTF-8")}" +
                     "&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}"
                 val response = httpGet(url)
                 val json = JSONObject(response)

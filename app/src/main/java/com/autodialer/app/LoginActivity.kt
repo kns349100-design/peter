@@ -9,8 +9,8 @@ import androidx.appcompat.app.AppCompatActivity
 import com.autodialer.app.databinding.ActivityLoginBinding
 
 /**
- * Login with phone number + OTP (sent by SMS from the backend). A correct OTP makes this device
- * the only active device for that number.
+ * Login / sign up with a mobile number or an email + a 6-digit code sent by the backend (SMS or email).
+ * A new account is created automatically; a correct code makes this device the only active device.
  */
 class LoginActivity : AppCompatActivity() {
 
@@ -45,10 +45,28 @@ class LoginActivity : AppCompatActivity() {
         stopCountdown()
     }
 
+    private val emailPattern = Regex("^[a-z0-9._%+\\-]+@[a-z0-9\\-]+(\\.[a-z0-9\\-]+)*\\.[a-z]{2,}$")
+
+    /** What the user typed, turned into the account id: an email (lower case) or +91XXXXXXXXXX. */
     private fun fullPhone(): String? {
-        val digits = binding.etPhone.text.toString().filter { it.isDigit() }
+        val raw = binding.etPhone.text.toString().trim()
+        if (raw.isEmpty()) {
+            binding.tvLoginStatus.text = "Enter your mobile number or email"
+            return null
+        }
+        if (raw.contains("@")) {
+            val email = raw.lowercase()
+            if (!emailPattern.matches(email)) {
+                binding.tvLoginStatus.text = "Enter a valid email address"
+                return null
+            }
+            return email
+        }
+        var digits = raw.filter { it.isDigit() }
+        if (digits.length == 12 && digits.startsWith("91")) digits = digits.substring(2)
+        else if (digits.length == 11 && digits.startsWith("0")) digits = digits.substring(1)
         if (digits.length != 10 || digits[0] !in '6'..'9') {
-            binding.tvLoginStatus.text = "Enter a valid 10-digit mobile number"
+            binding.tvLoginStatus.text = "Enter a valid 10-digit mobile number or an email"
             return null
         }
         return "+91$digits"
@@ -60,7 +78,7 @@ class LoginActivity : AppCompatActivity() {
         busy = true
         binding.btnSendOtp.isEnabled = false
         binding.btnResendOtp.isEnabled = false
-        binding.tvLoginStatus.text = "Sending OTP..."
+        binding.tvLoginStatus.text = "Sending code..."
         startSlowHint("Still sending - the server can take a few extra seconds, hang on...")
         authManager.sendOtp(phone) { success, message ->
             busy = false
@@ -68,7 +86,7 @@ class LoginActivity : AppCompatActivity() {
             binding.btnSendOtp.isEnabled = true
             if (success) {
                 showOtpStep()
-                binding.tvLoginStatus.text = "OTP sent to $phone"
+                binding.tvLoginStatus.text = if (phone.contains("@")) "Code sent to $phone - check Inbox and Spam" else "Code sent to $phone"
                 startResendCountdown(60)
             } else {
                 binding.tvLoginStatus.text = message
@@ -83,7 +101,7 @@ class LoginActivity : AppCompatActivity() {
         val phone = fullPhone() ?: return
         val otp = binding.etOtp.text.toString().filter { it.isDigit() }
         if (otp.length != 6) {
-            binding.tvLoginStatus.text = "Enter the 6-digit OTP"
+            binding.tvLoginStatus.text = "Enter the 6-digit code"
             return
         }
         busy = true
@@ -127,13 +145,13 @@ class LoginActivity : AppCompatActivity() {
                 if (left > 0) {
                     binding.btnResendOtp.isEnabled = false
                     binding.btnResendOtp.alpha = 0.5f
-                    binding.btnResendOtp.text = "Resend OTP in ${left}s"
+                    binding.btnResendOtp.text = "Resend code in ${left}s"
                     left--
                     handler.postDelayed(this, 1000)
                 } else {
                     binding.btnResendOtp.isEnabled = true
                     binding.btnResendOtp.alpha = 1f
-                    binding.btnResendOtp.text = "Resend OTP"
+                    binding.btnResendOtp.text = "Resend code"
                 }
             }
         }
@@ -145,7 +163,7 @@ class LoginActivity : AppCompatActivity() {
         countdownRunnable?.let { handler.removeCallbacks(it) }
         countdownRunnable = null
         binding.btnResendOtp.alpha = 1f
-        binding.btnResendOtp.text = "Resend OTP"
+        binding.btnResendOtp.text = "Resend code"
     }
 
     /** Shows a reassuring message if the backend hasn't responded within a few seconds
