@@ -6,10 +6,22 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.credentials.CredentialManager
+import androidx.credentials.CredentialManagerCallback
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.GetCredentialResponse
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
 import com.autodialer.app.databinding.ActivityLoginBinding
 
 /**
- * Login / sign up with a mobile number or an email + a 6-digit code sent by the backend (SMS or email).
+ * Login / sign up: one tap "Continue with Google" (no password), or an email address + a 6-digit code sent to it.
  * A new account is created automatically; a correct code makes this device the only active device.
  */
 class LoginActivity : AppCompatActivity() {
@@ -33,6 +45,7 @@ class LoginActivity : AppCompatActivity() {
             return
         }
 
+        binding.btnGoogle.setOnClickListener { signInWithGoogle() }
         binding.btnSendOtp.setOnClickListener { requestOtp() }
         binding.btnResendOtp.setOnClickListener { requestOtp() }
         binding.btnVerifyOtp.setOnClickListener { verifyOtp() }
@@ -47,29 +60,18 @@ class LoginActivity : AppCompatActivity() {
 
     private val emailPattern = Regex("^[a-z0-9._%+\\-]+@[a-z0-9\\-]+(\\.[a-z0-9\\-]+)*\\.[a-z]{2,}$")
 
-    /** What the user typed, turned into the account id: an email (lower case) or +91XXXXXXXXXX. */
+    /** What the user typed, checked and turned into the account id (a lower-case email), or null. */
     private fun fullPhone(): String? {
-        val raw = binding.etPhone.text.toString().trim()
-        if (raw.isEmpty()) {
-            binding.tvLoginStatus.text = "Enter your mobile number or email"
+        val email = binding.etPhone.text.toString().trim().lowercase()
+        if (email.isEmpty()) {
+            binding.tvLoginStatus.text = "Enter your email address"
             return null
         }
-        if (raw.contains("@")) {
-            val email = raw.lowercase()
-            if (!emailPattern.matches(email)) {
-                binding.tvLoginStatus.text = "Enter a valid email address"
-                return null
-            }
-            return email
-        }
-        var digits = raw.filter { it.isDigit() }
-        if (digits.length == 12 && digits.startsWith("91")) digits = digits.substring(2)
-        else if (digits.length == 11 && digits.startsWith("0")) digits = digits.substring(1)
-        if (digits.length != 10 || digits[0] !in '6'..'9') {
-            binding.tvLoginStatus.text = "Enter a valid 10-digit mobile number or an email"
+        if (!emailPattern.matches(email)) {
+            binding.tvLoginStatus.text = "Enter a valid email address"
             return null
         }
-        return "+91$digits"
+        return email
     }
 
     private fun requestOtp() {
@@ -86,7 +88,7 @@ class LoginActivity : AppCompatActivity() {
             binding.btnSendOtp.isEnabled = true
             if (success) {
                 showOtpStep()
-                binding.tvLoginStatus.text = if (phone.contains("@")) "Code sent to $phone - check Inbox and Spam" else "Code sent to $phone"
+                binding.tvLoginStatus.text = "Code sent to $phone - check Inbox and Spam"
                 startResendCountdown(60)
             } else {
                 binding.tvLoginStatus.text = message
@@ -121,8 +123,84 @@ class LoginActivity : AppCompatActivity() {
         }
     }
 
+    /** One tap "Continue with Google": no password and no code. Google gives the app an ID token,
+     * the backend asks Google to verify it, and the verified email becomes the account. */
+    private fun signInWithGoogle() {
+        if (busy) return
+        if (!GoogleConfig.isConfigured()) {
+            binding.tvLoginStatus.text = "Google sign-in is not set up yet - please use your email below"
+            return
+        }
+        busy = true
+        binding.btnGoogle.isEnabled = false
+        binding.tvLoginStatus.text = "Opening Google..."
+        val option = GetSignInWithGoogleOption.Builder(GoogleConfig.WEB_CLIENT_ID).build()
+        val request = GetCredentialRequest.Builder().addCredentialOption(option).build()
+        CredentialManager.create(this).getCredentialAsync(
+            this,
+            request,
+            null,
+            ContextCompat.getMainExecutor(this),
+            object : CredentialManagerCallback<GetCredentialResponse, GetCredentialException> {
+                override fun onResult(result: GetCredentialResponse) {
+                    handleGoogleResult(result)
+                }
+
+                override fun onError(e: GetCredentialException) {
+                    googleFailed(e)
+                }
+            }
+        )
+    }
+
+    private fun handleGoogleResult(result: GetCredentialResponse) {
+        val credential = result.credential
+        if (credential is CustomCredential &&
+            credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+        ) {
+            try {
+                val token = GoogleIdTokenCredential.createFrom(credential.data).idToken
+                binding.tvLoginStatus.text = "Signing you in..."
+                startSlowHint("Still signing in - the server can take a few extra seconds, hang on...")
+                authManager.googleLogin(token) { success, accountId, message ->
+                    busy = false
+                    cancelSlowHint()
+                    binding.btnGoogle.isEnabled = true
+                    if (success) {
+                        authManager.setLoggedIn(accountId)
+                        goToMain()
+                    } else {
+                        binding.tvLoginStatus.text = message
+                    }
+                }
+            } catch (e: GoogleIdTokenParsingException) {
+                finishGoogleWithError("Google sign-in failed. Please try again.")
+            }
+        } else {
+            finishGoogleWithError("Google sign-in failed. Please try again.")
+        }
+    }
+
+    private fun googleFailed(e: GetCredentialException) {
+        val msg = when (e) {
+            is GetCredentialCancellationException -> "Sign-in cancelled"
+            is NoCredentialException -> "No Google account found on this phone. Add one in Settings, or use your email below."
+            else -> "Google sign-in failed: ${e.message?.take(150) ?: e.type}"
+        }
+        finishGoogleWithError(msg)
+    }
+
+    private fun finishGoogleWithError(message: String) {
+        busy = false
+        cancelSlowHint()
+        binding.btnGoogle.isEnabled = true
+        binding.tvLoginStatus.text = message
+    }
+
     private fun showOtpStep() {
         binding.otpSection.visibility = View.VISIBLE
+        binding.btnGoogle.visibility = View.GONE
+        binding.tvOrDivider.visibility = View.GONE
         binding.btnSendOtp.visibility = View.GONE
         binding.etPhone.isEnabled = false
         binding.etOtp.requestFocus()
@@ -131,6 +209,8 @@ class LoginActivity : AppCompatActivity() {
     private fun backToPhoneEntry() {
         stopCountdown()
         binding.otpSection.visibility = View.GONE
+        binding.btnGoogle.visibility = View.VISIBLE
+        binding.tvOrDivider.visibility = View.VISIBLE
         binding.btnSendOtp.visibility = View.VISIBLE
         binding.etPhone.isEnabled = true
         binding.etOtp.text?.clear()
