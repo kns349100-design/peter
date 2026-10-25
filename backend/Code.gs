@@ -51,6 +51,7 @@ function doGet(e) {
     if (action === 'trialInfo') return handleTrialInfo(e);
     if (action === 'sendOtp') return handleSendOtp(e);
     if (action === 'verifyOtp') return handleVerifyOtp(e);
+    if (action === 'googleLogin') return handleGoogleLogin(e);
     if (action === 'login' || action === 'resetPin') return jsonResponse({ status: 'error', message: 'Login now uses OTP - please update the app.' });
     if (action === 'checkSession') return handleCheckSession(e);
     if (action === 'startTrial') return handleStartTrial(e);
@@ -736,41 +737,35 @@ function handleLogin(e) {
 }
 
 /**
- * ---- Login with MOBILE NUMBER or EMAIL + one-time code ----
+ * ---- Login with EMAIL + one-time code (free) ----
  *
- * The person types either a 10-digit mobile number or an email address. We send a 6-digit code:
- *   - to an EMAIL address  -> sent by this script through your Gmail (MailApp). Completely free, no
- *     extra phone or app needed. (Gmail allows roughly 100 emails a day for a normal @gmail.com account.)
- *   - to a MOBILE number   -> sent as an SMS from YOUR OWN phone's SIM through the free open-source
- *     "SMS Gateway for Android" app (Script Properties SMSGATE_USER / SMSGATE_PASS). Optional.
+ * The person types their email address. We email a 6-digit code from this script through your Gmail
+ * (MailApp) - completely free, nothing else to set up. (A normal @gmail.com account can send about
+ * 100 emails a day.) "Continue with Google" is the other way in (see handleGoogleLogin).
  *
- * The code is generated and checked only here on the server (kept 10 minutes in the script cache,
- * stored hashed). ONE ACCOUNT = ONE DEVICE: a correct code writes this device's id as the account's
- * ActiveDeviceId, so any other device logged into the same number/email is signed out the next time it
- * checks its session (handleCheckSession).
+ * The code is generated and checked only here on the server (kept 10 minutes in the script cache, stored
+ * hashed). ONE ACCOUNT = ONE DEVICE: a correct code writes this device's id as the account's
+ * ActiveDeviceId, so any other device logged into the same email is signed out the next time it checks
+ * its session (handleCheckSession).
  *
- * Abuse protection: 60 s between codes per account, 5 per account per hour, 10 per device per hour, and a
- * global cap per channel (kept under Gmail's / a SIM's daily sending limit). A wrong code gets 5 tries.
+ * Abuse protection: 60 s between codes per email, 5 per email per hour, 10 per device per hour, and a global
+ * cap (kept under Gmail's daily sending limit). A wrong code gets 5 tries.
  */
 var OTP_TTL_SECONDS = 600;
 var OTP_MAX_VERIFY_ATTEMPTS = 5;
 var OTP_RESEND_COOLDOWN_SECONDS = 60;
 var OTP_MAX_PER_ACCOUNT_PER_HOUR = 5;
 var OTP_MAX_PER_DEVICE_PER_HOUR = 10;
-var OTP_MAX_SMS_PER_6H = 30;     // a SIM usually allows ~100 SMS a day
 var OTP_MAX_EMAIL_PER_6H = 40;   // Gmail allows ~100 emails a day
 
-/** Turns what the user typed into {type:'phone'|'email', id} (id is the normalised account key), or null. */
+/** Turns what the user typed into {type:'email', id} (id = lower-case email, the account key), or null. */
 function parseLoginId(raw) {
   var v = String(raw == null ? '' : raw).trim();
-  if (v.indexOf('@') !== -1) {
-    var email = v.toLowerCase();
-    if (email.length <= 100 && /^[a-z0-9._%+\-]+@[a-z0-9\-]+(\.[a-z0-9\-]+)*\.[a-z]{2,}$/.test(email)) {
-      return { type: 'email', id: email };
-    }
-    return null;
+  if (v.indexOf('@') === -1) return null;
+  var email = v.toLowerCase();
+  if (email.length <= 100 && /^[a-z0-9._%+\-]+@[a-z0-9\-]+(\.[a-z0-9\-]+)*\.[a-z]{2,}$/.test(email)) {
+    return { type: 'email', id: email };
   }
-  if (/^\+91[6-9][0-9]{9}$/.test(v)) return { type: 'phone', id: v };
   return null;
 }
 
@@ -794,29 +789,6 @@ function readCounter(cache, key) {
 
 function bumpCounter(cache, key, ttlSeconds) {
   cache.put(key, String(readCounter(cache, key) + 1), ttlSeconds);
-}
-
-/** Sends the code by SMS through the SMS Gateway app running on your phone. Returns true if accepted. */
-function sendOtpSms(user, pass, phone, otp) {
-  try {
-    var res = UrlFetchApp.fetch('https://api.sms-gate.app/3rdparty/v1/message', {
-      method: 'post',
-      contentType: 'application/json',
-      headers: { Authorization: 'Basic ' + Utilities.base64Encode(user + ':' + pass) },
-      payload: JSON.stringify({
-        textMessage: { text: 'Your CallConnect login OTP is ' + otp + '. Do not share it with anyone.' },
-        phoneNumbers: [phone]
-      }),
-      muteHttpExceptions: true
-    });
-    var code = res.getResponseCode();
-    if (code >= 200 && code < 300) return true;
-    console.error('SMS gateway rejected the request: HTTP ' + code + ' ' + String(res.getContentText()).substring(0, 200));
-    return false;
-  } catch (err) {
-    console.error('SMS gateway call failed: ' + err);
-    return false;
-  }
 }
 
 /** Sends the code by email through your Gmail. Free. Returns true if Gmail accepted it. */
@@ -843,27 +815,11 @@ function testEmail() {
   Logger.log('Test email sent to ' + me + '. Remaining quota today: ' + MailApp.getRemainingDailyQuota());
 }
 
-/** Optional: put your own number in, select this function and Run to test the SMS Gateway setup. */
-function testSmsGateway() {
-  var props = PropertiesService.getScriptProperties();
-  var ok = sendOtpSms(props.getProperty('SMSGATE_USER'), props.getProperty('SMSGATE_PASS'), '+91XXXXXXXXXX', '123456');
-  Logger.log(ok ? 'Accepted - the SMS should arrive in a few seconds' : 'Rejected - see Executions log for the reason');
-}
-
 function handleSendOtp(e) {
   var who = parseLoginId(e.parameter.id || e.parameter.phone);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!who || !deviceId) {
-    return jsonResponse({ status: 'error', message: 'Enter a valid 10-digit mobile number or an email address' });
-  }
-  var smsUser = null, smsPass = null;
-  if (who.type === 'phone') {
-    var props = PropertiesService.getScriptProperties();
-    smsUser = props.getProperty('SMSGATE_USER');
-    smsPass = props.getProperty('SMSGATE_PASS');
-    if (!smsUser || !smsPass) {
-      return jsonResponse({ status: 'error', message: 'Mobile OTP is not set up yet - please log in with your email instead' });
-    }
+    return jsonResponse({ status: 'error', message: 'Enter a valid email address' });
   }
 
   return withLock(function () {
@@ -880,20 +836,18 @@ function handleSendOtp(e) {
       }
     }
     if (readCounter(cache, 'otpcnt_p_' + who.id) >= OTP_MAX_PER_ACCOUNT_PER_HOUR) {
-      return jsonResponse({ status: 'error', message: 'Too many code requests for this account. Try again after some time.' });
+      return jsonResponse({ status: 'error', message: 'Too many code requests for this email. Try again after some time.' });
     }
     if (readCounter(cache, 'otpcnt_d_' + deviceId) >= OTP_MAX_PER_DEVICE_PER_HOUR) {
       return jsonResponse({ status: 'error', message: 'Too many code requests from this device. Try again after some time.' });
     }
-    var globalKey = 'otpcnt_g_' + who.type;
-    var globalCap = who.type === 'email' ? OTP_MAX_EMAIL_PER_6H : OTP_MAX_SMS_PER_6H;
-    if (readCounter(cache, globalKey) >= globalCap) {
+    var globalKey = 'otpcnt_g_email';
+    if (readCounter(cache, globalKey) >= OTP_MAX_EMAIL_PER_6H) {
       return jsonResponse({ status: 'error', message: 'Login codes are busy right now. Please try again later.' });
     }
 
     var otp = randomOtp();
-    var sent = who.type === 'email' ? sendOtpEmail(who.id, otp) : sendOtpSms(smsUser, smsPass, who.id, otp);
-    if (!sent) {
+    if (!sendOtpEmail(who.id, otp)) {
       return jsonResponse({ status: 'error', message: 'Could not send the code. Please try again in a minute.' });
     }
 
@@ -901,7 +855,7 @@ function handleSendOtp(e) {
     bumpCounter(cache, 'otpcnt_p_' + who.id, 3600);
     bumpCounter(cache, 'otpcnt_d_' + deviceId, 3600);
     bumpCounter(cache, globalKey, 21600);
-    return jsonResponse({ status: 'ok', channel: who.type, resendAfter: OTP_RESEND_COOLDOWN_SECONDS });
+    return jsonResponse({ status: 'ok', channel: 'email', resendAfter: OTP_RESEND_COOLDOWN_SECONDS });
   });
 }
 
@@ -942,14 +896,81 @@ function handleVerifyOtp(e) {
 
     // Correct code. A new number/email is signed up automatically; an existing one just logs in.
     // Either way THIS device becomes the one and only active device for the account.
-    var sheet = getUsersSheet();
-    var rowNum = findUserRow(sheet, who.id);
-    if (rowNum === -1) {
-      sheet.appendRow([safeCell(who.id), '', safeCell(deviceId), now, 0, 0]);
-      return jsonResponse({ status: 'ok', registered: true });
+    var done = loginAccount(who.id, deviceId);
+    return jsonResponse({ status: 'ok', registered: done.registered });
+  });
+}
+
+/** Signs a verified account in on this device (creating the account first if it is new).
+ * ONE ACCOUNT = ONE DEVICE: this device's id becomes the account's ActiveDeviceId, which signs every
+ * other device out the next time it checks its session. Call with the script lock held. */
+function loginAccount(id, deviceId) {
+  var now = Date.now();
+  var sheet = getUsersSheet();
+  var rowNum = findUserRow(sheet, id);
+  if (rowNum === -1) {
+    sheet.appendRow([safeCell(id), '', safeCell(deviceId), now, 0, 0]);
+    return { registered: true };
+  }
+  sheet.getRange(rowNum, 3, 1, 4).setValues([[safeCell(deviceId), now, 0, 0]]);
+  return { registered: false };
+}
+
+/**
+ * "Sign in with Google" - no password, no code. The app gets a Google ID token on the phone and sends it
+ * here. We ask GOOGLE to check it (tokeninfo) and only accept it when it was issued for OUR app
+ * (audience = GOOGLE_WEB_CLIENT_ID), is not expired and the email is verified. The account id is then the
+ * verified Google email - the same id the email-code login uses, so both lead to the same account.
+ * Script Property needed: GOOGLE_WEB_CLIENT_ID (the "Web application" OAuth client id, see GOOGLE_LOGIN_SETUP.md).
+ */
+function handleGoogleLogin(e) {
+  var idToken = String(e.parameter.idToken || '').trim();
+  var deviceId = cleanInput(e.parameter.deviceId, 200);
+  if (!idToken || idToken.length > 6000 || !deviceId) {
+    return jsonResponse({ status: 'error', message: 'Google sign-in failed. Please try again.' });
+  }
+  var clientId = PropertiesService.getScriptProperties().getProperty('GOOGLE_WEB_CLIENT_ID');
+  if (!clientId) {
+    return jsonResponse({ status: 'error', message: 'Google sign-in is not set up on the server yet' });
+  }
+
+  var cache = CacheService.getScriptCache();
+  var tries = readCounter(cache, 'ggl_d_' + deviceId);
+  if (tries >= 20) {
+    return jsonResponse({ status: 'error', message: 'Too many sign-in attempts. Try again after some time.' });
+  }
+  bumpCounter(cache, 'ggl_d_' + deviceId, 3600);
+
+  var info;
+  try {
+    // POST (not a long URL) so even a large token is accepted.
+    var res = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo', {
+      method: 'post',
+      payload: { id_token: idToken },
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) {
+      return jsonResponse({ status: 'error', message: 'Google sign-in could not be verified. Please try again.' });
     }
-    sheet.getRange(rowNum, 3, 1, 4).setValues([[safeCell(deviceId), now, 0, 0]]);
-    return jsonResponse({ status: 'ok', registered: false });
+    info = JSON.parse(res.getContentText());
+  } catch (err) {
+    return jsonResponse({ status: 'error', message: 'Could not reach Google. Please try again.' });
+  }
+
+  var issuerOk = info && (info.iss === 'accounts.google.com' || info.iss === 'https://accounts.google.com');
+  var emailVerified = info && (info.email_verified === true || String(info.email_verified) === 'true');
+  var notExpired = info && Number(info.exp) * 1000 > Date.now();
+  if (!info || info.aud !== clientId || !issuerOk || !emailVerified || !notExpired || !info.email) {
+    return jsonResponse({ status: 'error', message: 'Google sign-in was rejected for this app. Please try again.' });
+  }
+  var who = parseLoginId(info.email);
+  if (!who || who.type !== 'email') {
+    return jsonResponse({ status: 'error', message: 'This Google account has no usable email.' });
+  }
+
+  return withLock(function () {
+    var done = loginAccount(who.id, deviceId);
+    return jsonResponse({ status: 'ok', registered: done.registered, email: who.id });
   });
 }
 
