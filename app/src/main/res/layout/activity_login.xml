@@ -191,5 +191,14 @@
             android:textColor="#B0B5C4"
             android:textSize="12sp"/>
 
+        <TextView
+            android:id="@+id/tvVersion"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="center"
+            android:textColor="#C9CDD8"
+            android:textSize="10sp"/>
+
     </LinearLayout>
 </ScrollView>
