@@ -11,7 +11,7 @@ package com.autodialer.app
  * It is a public id, not a secret - it is fine for it to live in the app.
  */
 object GoogleConfig {
-    const val WEB_CLIENT_ID = "766090283187-nsqof6qfci7on9mglnm64q05edk82a8k.apps.googleusercontent.com"
+    const val WEB_CLIENT_ID = "766090283187-7qj9bhr1pn76v405vg5qd34hngjm5org.apps.googleusercontent.com"
 
     fun isConfigured(): Boolean = !WEB_CLIENT_ID.startsWith("PASTE_")
 }
