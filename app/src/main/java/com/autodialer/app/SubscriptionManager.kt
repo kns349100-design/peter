@@ -240,7 +240,8 @@ class SubscriptionManager(private val context: Context) {
             if (prefs.contains("trialStartedAt")) return
             val phone = AuthManager(context).phoneNumber()
             if (phone.isBlank()) return
-            val url = "$SCRIPT_URL?action=trialInfo&phone=${URLEncoder.encode(phone, "UTF-8")}"
+            val url = "$SCRIPT_URL?action=trialInfo&phone=${URLEncoder.encode(phone, "UTF-8")}" +
+                "&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}"
             val json = JSONObject(httpGet(url))
             if (json.optString("status") == "ok" && json.optBoolean("used", false)) {
                 val startedAt = json.optLong("startedAt", 0L)

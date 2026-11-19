@@ -62,9 +62,15 @@ object NumberParser {
         val candidates = extractPhoneNumbers(line).toList()
         if (candidates.isEmpty()) return emptyList()
 
-        var leftover = line
-        candidates.forEach { leftover = leftover.replace(it, " ") }
-        leftover = leftover.trim(' ', ',', '-', '|', '\t', ':', ';').trim()
+        // Remove the numbers exactly as they were WRITTEN (with their spaces/hyphens/brackets) so
+        // none of the number's text leaks into the name. Removing only the cleaned form
+        // ("919876543210") never matched "+91 98765 43210" and left it inside the label.
+        var leftover = spaced.replace(line) { m ->
+            val digits = m.value.filter { it.isDigit() }
+            if (digits.length in 10..13) " " else m.value
+        }
+        leftover = plainRun.replace(leftover, " ")
+        leftover = leftover.trim(' ', ',', '-', '|', '\t', ':', ';', '(', ')', '[', ']', '+', '.').trim()
         val label = leftover.split(",").map { it.trim() }.firstOrNull { it.isNotBlank() && it.any { c -> c.isLetter() } }
 
         return candidates.mapIndexedNotNull { i, token ->

@@ -1,3 +1,4 @@
+
 name: Build APK
 
 on:
@@ -8,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -15,18 +17,22 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
-          java-version: "17"
+          distribution: temurin
+          java-version: '17'
 
-      # The Ubuntu runner already ships with the Android SDK, so no separate SDK-setup action
-      # is needed (that action started failing). Only the licences have to be accepted.
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: 8.5
+          gradle-version: '8.7'
+
+      - name: Backend integration tests
+        run: node backend/tests/integration.test.js
+
+      - name: Run unit + integration tests
+        run: gradle testDebugUnitTest
 
       - name: Build debug APK
         run: gradle assembleDebug

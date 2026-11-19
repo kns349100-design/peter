@@ -113,7 +113,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
-                        android:text="₹299 paid"
+                        android:text="₹300 paid"
                         android:textColor="@color/pricing_text_gray"
                         android:textSize="12sp"/>
                 </LinearLayout>

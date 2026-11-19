@@ -119,18 +119,14 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
         try {
             val checkout = Checkout()
             checkout.setKeyID(order.keyId)
-            val accountId = AuthManager(this).phoneNumber()
-            val isEmail = accountId.contains("@")
-            val phone = if (isEmail) "" else accountId.filter { it.isDigit() }.takeLast(10)
+            val phone = AuthManager(this).phoneNumber().filter { it.isDigit() }.takeLast(10)
             val options = JSONObject()
             options.put("name", "CallConnect")
             options.put("description", planLabel)
             options.put("order_id", order.orderId)
             options.put("currency", "INR")
             options.put("amount", order.amountPaise)
-            if (isEmail) {
-                options.put("prefill", JSONObject().put("email", accountId))
-            } else if (phone.length == 10) {
+            if (phone.length == 10) {
                 options.put("prefill", JSONObject().put("contact", phone))
             }
             options.put("theme", JSONObject().put("color", "#1A56DB"))

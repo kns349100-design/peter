@@ -71,7 +71,10 @@ class CallEngine(
         override fun onCallStateChanged(state: Int, phoneNumber: String?) {
             super.onCallStateChanged(state, phoneNumber)
             when (state) {
-                TelephonyManager.CALL_STATE_OFFHOOK -> wasOffHook = true
+                TelephonyManager.CALL_STATE_OFFHOOK -> {
+                    wasOffHook = true
+                    sequencer?.onCallConnected()
+                }
                 TelephonyManager.CALL_STATE_IDLE -> {
                     if (wasOffHook) {
                         wasOffHook = false
@@ -113,7 +116,7 @@ class CallEngine(
                 leads[i].status = CallSequencer.Status.COMPLETED
                 recoveredPendingOutcome = i
             }
-            sequencer!!.statuses[i] = leads[i].status
+            sequencer!!.restoreStatus(i, leads[i].status)
         }
 
         // Restore any outcome that was still waiting to be tagged when the app was
@@ -131,6 +134,7 @@ class CallEngine(
 
     private fun registerListener() {
         if (!listenerRegistered) {
+            wasOffHook = false // stale flag from an earlier call would turn the first IDLE into a fake "call ended"
             telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
             listenerRegistered = true
         }
@@ -138,6 +142,7 @@ class CallEngine(
 
     private fun unregisterListener() {
         if (listenerRegistered) {
+            wasOffHook = false
             telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
             listenerRegistered = false
         }
@@ -214,6 +219,14 @@ class CallEngine(
 
     fun stop() {
         sequencer?.stop()
+        // A call that was already placed when Stop was pressed is NEVER put back to Pending: it is
+        // treated exactly like a call that just ended, so the next Start asks for its outcome.
+        val interrupted = sequencer?.takeInterrupted() ?: -1
+        if (interrupted in leads.indices) {
+            leads[interrupted].status = CallSequencer.Status.COMPLETED
+            listener.onLeadUpdated(interrupted, CallSequencer.Status.COMPLETED)
+            pendingOutcomeIndex = interrupted
+        }
         handler.removeCallbacksAndMessages(null)
         unregisterListener()
         // Deliberately NOT clearing pendingOutcomeIndex here: if a call ended and its outcome
@@ -225,11 +238,16 @@ class CallEngine(
 
     fun skip() {
         val seq = sequencer ?: return
+        if (seq.callActive || pendingOutcomeIndex != null) {
+            listener.onLog("Skip ignored - a call is in progress or waiting for its outcome")
+            return
+        }
         val index = seq.currentIndex
         val leadForLog = if (index in leads.indices) leads[index] else null
         val result = seq.skip()
+        val snapshot = seq.statuses // one copy, not one per lead
         for (i in leads.indices) {
-            if (seq.statuses[i] == CallSequencer.Status.SKIPPED && leads[i].status != CallSequencer.Status.SKIPPED) {
+            if (snapshot[i] == CallSequencer.Status.SKIPPED && leads[i].status != CallSequencer.Status.SKIPPED) {
                 leads[i].status = CallSequencer.Status.SKIPPED
                 listener.onLeadUpdated(i, CallSequencer.Status.SKIPPED)
             }
@@ -252,6 +270,9 @@ class CallEngine(
         persist()
     }
 
+    private val normCache = HashMap<String, String>()
+    private fun norm(phone: String): String = normCache.getOrPut(phone) { PhoneUtils.normalize(phone) }
+
     private fun dial(index: Int) {
         if (index !in leads.indices) return
         val lead = leads[index]
@@ -259,13 +280,13 @@ class CallEngine(
         // Final safety net, right at the moment of dialing: never call the same number twice.
         // Catches anything that could slip past the load-time dedup - e.g. the same number in
         // two different formats, or any other edge case - so a double call is never possible.
-        val normalized = PhoneUtils.normalize(lead.phone)
+        val normalized = norm(lead.phone)
         // Status is checked first so the (comparatively slow) number normalising only runs for
         // numbers that were actually finished - keeps dialing instant even on a very long list.
         val duplicateWithinThisList = leads.withIndex().any { (i, other) ->
             i != index &&
                 (other.status == CallSequencer.Status.COMPLETED || other.status == CallSequencer.Status.SKIPPED) &&
-                PhoneUtils.normalize(other.phone) == normalized
+                norm(other.phone) == normalized
         }
         if (duplicateWithinThisList || callLogStore.calledToday(normalized)) {
             listener.onLog("Skipping ${lead.phone} - already called, preventing a double call")
@@ -291,6 +312,11 @@ class CallEngine(
         listener.onLog("Calling ${lead.phone}")
 
         if (telephonyManager.callState != TelephonyManager.CALL_STATE_IDLE) {
+            // Nothing was dialed: undo the reservation so this lead is not stuck as CALLING (which a
+            // restore would later turn into a phantom "completed" call).
+            sequencer?.abortDial(index)
+            leads[index].status = CallSequencer.Status.PENDING
+            listener.onLeadUpdated(index, CallSequencer.Status.PENDING)
             listener.onEngineError("Phone already busy on another call - stopping to stay safe")
             stop()
             return
@@ -299,7 +325,9 @@ class CallEngine(
         val intent = Intent(Intent.ACTION_CALL)
         intent.data = Uri.parse("tel:${lead.phone}")
         try {
+            wasOffHook = false
             activity.startActivity(intent)
+            sequencer?.markDialIssued(index) // from here on this lead can never be dialed again
             callsDialedThisBatch += 1
             // Log the number as "called" right now, at dial time - not after an outcome is
             // picked. This is what keeps it out of future lists even if the outcome never
@@ -319,7 +347,7 @@ class CallEngine(
             // Nothing was actually dialed (permission missing, no phone app, etc) - put the
             // number back to Pending so it is never wrongly treated as already called.
             leads[index].status = CallSequencer.Status.PENDING
-            sequencer?.statuses?.set(index, CallSequencer.Status.PENDING)
+            sequencer?.abortDial(index)
             listener.onLeadUpdated(index, CallSequencer.Status.PENDING)
             listener.onEngineError(if (e is SecurityException) "Call permission missing" else "Could not place the call")
             stop()
@@ -333,9 +361,7 @@ class CallEngine(
             listener.onLog("Duplicate call-state event ignored")
             return
         }
-        val endedIndex = leads.indices.firstOrNull {
-            seq.statuses[it] == CallSequencer.Status.COMPLETED && leads[it].status != CallSequencer.Status.COMPLETED
-        }
+        val endedIndex = seq.lastEndedIndex().takeIf { it in leads.indices }
         if (endedIndex != null) {
             leads[endedIndex].status = CallSequencer.Status.COMPLETED
             listener.onLeadUpdated(endedIndex, CallSequencer.Status.COMPLETED)

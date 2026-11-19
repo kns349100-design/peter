@@ -51,7 +51,6 @@ function doGet(e) {
     if (action === 'trialInfo') return handleTrialInfo(e);
     if (action === 'sendOtp') return handleSendOtp(e);
     if (action === 'verifyOtp') return handleVerifyOtp(e);
-    if (action === 'googleLogin') return handleGoogleLogin(e);
     if (action === 'login' || action === 'resetPin') return jsonResponse({ status: 'error', message: 'Login now uses OTP - please update the app.' });
     if (action === 'checkSession') return handleCheckSession(e);
     if (action === 'startTrial') return handleStartTrial(e);
@@ -151,7 +150,7 @@ function cashfreeHeaders() {
 function handleCreatePaymentLink(e) {
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   var planType = cleanInput(e.parameter.planType, 20).toUpperCase();
-  var phone = cleanInput(e.parameter.phone, 100);
+  var phone = cleanInput(e.parameter.phone, 20);
 
   if (!deviceId || !planType) {
     return jsonResponse({ status: 'error', message: 'missing params' });
@@ -476,6 +475,17 @@ function activateRazorpayOrder(orderId, deviceId, keys) {
   if (response.getResponseCode() !== 200 || !order || order.id !== orderId) {
     return { ok: false, message: 'Order nahi mila', orderStatus: 'unknown' };
   }
+  // SECURITY: ownership comes from the notes the SERVER wrote when it created the order - not from the
+  // newest-300-rows window of the Orders tab, which an attacker can push an old order out of.
+  var owner = order.notes && order.notes.deviceId ? String(order.notes.deviceId).trim() : '';
+  if (owner && owner !== deviceId) {
+    return { ok: false, message: 'Ye order kisi aur device ka hai', orderStatus: 'foreign' };
+  }
+  if (!owner) {
+    var known = false;
+    for (var q = 0; q < recent.length; q++) { if (recent[q].orderId === orderId && recent[q].deviceId === deviceId) known = true; }
+    if (!known) return { ok: false, message: 'Order nahi mila', orderStatus: 'unknown' };
+  }
   if (order.status !== 'paid' || Number(order.amount_paid) < Number(order.amount)) {
     return { ok: false, message: 'Payment abhi complete nahi hua (status: ' + (order.status || 'unknown') + ')', orderStatus: order.status || 'unknown' };
   }
@@ -568,6 +578,9 @@ function grantExpiry(type, now) {
 
 /** Locked so two devices redeeming the same limited-use code at the exact same
  * instant can never both succeed and push its use count past the limit. */
+var REDEEM_MAX_FAILS_PER_DEVICE_PER_HOUR = 10;
+var REDEEM_MAX_FAILS_GLOBAL_PER_HOUR = 300;
+
 function handleRedeem(e) {
   var code = cleanInput(e.parameter.code, 50).toUpperCase();
   var deviceId = cleanInput(e.parameter.deviceId, 200);
@@ -576,6 +589,11 @@ function handleRedeem(e) {
   }
 
   return withLock(function () {
+    var cache = CacheService.getScriptCache();
+    var failKeyD = 'rdm_d_' + deviceId, failKeyG = 'rdm_g';
+    if (readCounter(cache, failKeyD) >= REDEEM_MAX_FAILS_PER_DEVICE_PER_HOUR || readCounter(cache, failKeyG) >= REDEEM_MAX_FAILS_GLOBAL_PER_HOUR) {
+      return jsonResponse({ status: 'error', message: 'Too many wrong codes. Try again after some time.' });
+    }
     var codesSheet = getSheet('Codes');
     var data = codesSheet.getDataRange().getValues();
 
@@ -607,6 +625,8 @@ function handleRedeem(e) {
       return jsonResponse({ status: 'ok', expiryAt: expiryAt, planType: type });
     }
 
+    bumpCounter(cache, failKeyD, 3600);
+    bumpCounter(cache, failKeyG, 3600);
     return jsonResponse({ status: 'error', message: 'Invalid code' });
   });
 }
@@ -684,7 +704,7 @@ function findUserRow(sheet, phone) {
  * instant can never both register a different PIN as "the" PIN, and so a
  * failed-attempt counter can never be double-counted or skipped. */
 function handleLogin(e) {
-  var phone = cleanInput(e.parameter.phone, 100);
+  var phone = cleanInput(e.parameter.phone, 20);
   var pin = cleanInput(e.parameter.pin, 10);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
 
@@ -737,40 +757,30 @@ function handleLogin(e) {
 }
 
 /**
- * ---- Login with EMAIL + one-time code (free) ----
+ * ---- Phone number + OTP login (free: the SMS is sent from YOUR OWN phone's SIM) ----
+ * Uses the open-source "SMS Gateway for Android" app (cloud relay api.sms-gate.app, free, no signup).
+ * Script Properties needed: SMSGATE_USER, SMSGATE_PASS (shown inside the SMS Gateway app under
+ * "Cloud Server"). See OTP_SETUP.md.
  *
- * The person types their email address. We email a 6-digit code from this script through your Gmail
- * (MailApp) - completely free, nothing else to set up. (A normal @gmail.com account can send about
- * 100 emails a day.) "Continue with Google" is the other way in (see handleGoogleLogin).
+ * The OTP is generated and checked only here on the server (kept 10 minutes in the script cache,
+ * stored hashed). One number = one device: a correct OTP writes this device's id as the number's
+ * ActiveDeviceId, so any other device logged in with that number is signed out the next time it
+ * checks its session (handleCheckSession).
  *
- * The code is generated and checked only here on the server (kept 10 minutes in the script cache, stored
- * hashed). ONE ACCOUNT = ONE DEVICE: a correct code writes this device's id as the account's
- * ActiveDeviceId, so any other device logged into the same email is signed out the next time it checks
- * its session (handleCheckSession).
- *
- * Abuse protection: 60 s between codes per email, 5 per email per hour, 10 per device per hour, and a global
- * cap (kept under Gmail's daily sending limit). A wrong code gets 5 tries.
+ * Abuse / SIM protection: 60 s between OTPs per number, 5 per number per hour, 10 per device per
+ * hour, and a global cap (kept under a normal SIM's daily SMS limit so the SIM never gets blocked).
+ * A wrong code is allowed 5 tries per OTP.
  */
 var OTP_TTL_SECONDS = 600;
 var OTP_MAX_VERIFY_ATTEMPTS = 5;
 var OTP_RESEND_COOLDOWN_SECONDS = 60;
-var OTP_MAX_PER_ACCOUNT_PER_HOUR = 5;
+var OTP_MAX_PER_PHONE_PER_HOUR = 5;
 var OTP_MAX_PER_DEVICE_PER_HOUR = 10;
-var OTP_MAX_EMAIL_PER_6H = 40;   // Gmail allows ~100 emails a day
+var OTP_MAX_GLOBAL_PER_6H = 30;
+var OTP_MAX_KNOWN_PER_6H = 100;
 
-/** Turns what the user typed into {type:'email', id} (id = lower-case email, the account key), or null. */
-function parseLoginId(raw) {
-  var v = String(raw == null ? '' : raw).trim();
-  if (v.indexOf('@') === -1) return null;
-  var email = v.toLowerCase();
-  if (email.length <= 100 && /^[a-z0-9._%+\-]+@[a-z0-9\-]+(\.[a-z0-9\-]+)*\.[a-z]{2,}$/.test(email)) {
-    return { type: 'email', id: email };
-  }
-  return null;
-}
-
-function otpHash(id, otp) {
-  return hashPin(id + ':' + otp);
+function otpHash(phone, otp) {
+  return hashPin(phone + ':' + otp);
 }
 
 function randomOtp() {
@@ -791,191 +801,138 @@ function bumpCounter(cache, key, ttlSeconds) {
   cache.put(key, String(readCounter(cache, key) + 1), ttlSeconds);
 }
 
-/** Sends the code by email through your Gmail. Free. Returns true if Gmail accepted it. */
-function sendOtpEmail(email, otp) {
+/** Sends the SMS through the SMS Gateway app running on your phone. Returns true if accepted. */
+function sendOtpSms(user, pass, phone, otp) {
   try {
-    MailApp.sendEmail({
-      to: email,
-      subject: 'Your CallConnect login code: ' + otp,
-      body: 'Your CallConnect login code is ' + otp + '.\n\nIt is valid for 10 minutes. Do not share it with anyone.\n' +
-            'If you did not ask for this code, you can ignore this email.',
-      name: 'CallConnect'
+    var res = UrlFetchApp.fetch('https://api.sms-gate.app/3rdparty/v1/message', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Basic ' + Utilities.base64Encode(user + ':' + pass) },
+      payload: JSON.stringify({
+        textMessage: { text: 'Your CallConnect login OTP is ' + otp + '. Do not share it with anyone.' },
+        phoneNumbers: [phone]
+      }),
+      muteHttpExceptions: true
     });
-    return true;
+    var code = res.getResponseCode();
+    if (code >= 200 && code < 300) return true;
+    console.error('SMS gateway rejected the request: HTTP ' + code + ' ' + String(res.getContentText()).substring(0, 200));
+    return false;
   } catch (err) {
-    console.error('Email send failed: ' + err);
+    console.error('SMS gateway call failed: ' + err);
     return false;
   }
 }
 
-/** Run this once from the Apps Script editor: it asks you to allow "send email", and mails you a test. */
-function testEmail() {
-  var me = Session.getEffectiveUser().getEmail();
-  MailApp.sendEmail(me, 'CallConnect test', 'Email sending works. Remaining emails today: ' + MailApp.getRemainingDailyQuota());
-  Logger.log('Test email sent to ' + me + '. Remaining quota today: ' + MailApp.getRemainingDailyQuota());
+/** Run this once from the Apps Script editor (after editing the number) to check the SMS setup. */
+function testSmsGateway() {
+  var props = PropertiesService.getScriptProperties();
+  var ok = sendOtpSms(props.getProperty('SMSGATE_USER'), props.getProperty('SMSGATE_PASS'), '+91XXXXXXXXXX', '123456');
+  Logger.log(ok ? 'Accepted - the SMS should arrive in a few seconds' : 'Rejected - see Executions log for the reason');
 }
 
 function handleSendOtp(e) {
-  var who = parseLoginId(e.parameter.id || e.parameter.phone);
+  var phone = cleanInput(e.parameter.phone, 20);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!who || !deviceId) {
-    return jsonResponse({ status: 'error', message: 'Enter a valid email address' });
+  if (!/^\+91[6-9][0-9]{9}$/.test(phone) || !deviceId) {
+    return jsonResponse({ status: 'error', message: 'Enter a valid 10-digit mobile number' });
+  }
+  var props = PropertiesService.getScriptProperties();
+  var smsUser = props.getProperty('SMSGATE_USER');
+  var smsPass = props.getProperty('SMSGATE_PASS');
+  if (!smsUser || !smsPass) {
+    return jsonResponse({ status: 'error', message: 'SMS service is not configured yet' });
   }
 
   return withLock(function () {
     var cache = CacheService.getScriptCache();
     var now = Date.now();
-    var otpKey = 'otp_' + who.id;
+    var otpKey = 'otp_' + phone;
 
     var existing = cache.get(otpKey);
     if (existing) {
       var prev = JSON.parse(existing);
       var waitS = OTP_RESEND_COOLDOWN_SECONDS - Math.floor((now - prev.sentAt) / 1000);
       if (waitS > 0) {
-        return jsonResponse({ status: 'error', message: 'Please wait ' + waitS + ' sec before requesting another code' });
+        return jsonResponse({ status: 'error', message: 'Please wait ' + waitS + ' sec before requesting another OTP' });
       }
     }
-    if (readCounter(cache, 'otpcnt_p_' + who.id) >= OTP_MAX_PER_ACCOUNT_PER_HOUR) {
-      return jsonResponse({ status: 'error', message: 'Too many code requests for this email. Try again after some time.' });
+    if (readCounter(cache, 'otpcnt_p_' + phone) >= OTP_MAX_PER_PHONE_PER_HOUR) {
+      return jsonResponse({ status: 'error', message: 'Too many OTP requests for this number. Try again after some time.' });
     }
     if (readCounter(cache, 'otpcnt_d_' + deviceId) >= OTP_MAX_PER_DEVICE_PER_HOUR) {
-      return jsonResponse({ status: 'error', message: 'Too many code requests from this device. Try again after some time.' });
+      return jsonResponse({ status: 'error', message: 'Too many OTP requests from this device. Try again after some time.' });
     }
-    var globalKey = 'otpcnt_g_email';
-    if (readCounter(cache, globalKey) >= OTP_MAX_EMAIL_PER_6H) {
-      return jsonResponse({ status: 'error', message: 'Login codes are busy right now. Please try again later.' });
+    // Two tiers: unknown numbers share a small pool, existing customers have their own reserve - so a
+    // flood of fake numbers (rotating deviceIds) cannot lock real, registered users out of logging in.
+    var known = findUserRow(getUsersSheet(), phone) !== -1;
+    var poolKey = known ? 'otpcnt_gk' : 'otpcnt_g';
+    if (readCounter(cache, poolKey) >= (known ? OTP_MAX_KNOWN_PER_6H : OTP_MAX_GLOBAL_PER_6H)) {
+      return jsonResponse({ status: 'error', message: 'OTP service is busy right now. Please try again later.' });
     }
 
     var otp = randomOtp();
-    if (!sendOtpEmail(who.id, otp)) {
-      return jsonResponse({ status: 'error', message: 'Could not send the code. Please try again in a minute.' });
+    if (!sendOtpSms(smsUser, smsPass, phone, otp)) {
+      return jsonResponse({ status: 'error', message: 'Could not send the OTP SMS. Please try again in a minute.' });
     }
 
-    cache.put(otpKey, JSON.stringify({ h: otpHash(who.id, otp), sentAt: now, attempts: 0 }), OTP_TTL_SECONDS);
-    bumpCounter(cache, 'otpcnt_p_' + who.id, 3600);
+    cache.put(otpKey, JSON.stringify({ h: otpHash(phone, otp), sentAt: now, attempts: 0 }), OTP_TTL_SECONDS);
+    bumpCounter(cache, 'otpcnt_p_' + phone, 3600);
     bumpCounter(cache, 'otpcnt_d_' + deviceId, 3600);
-    bumpCounter(cache, globalKey, 21600);
-    return jsonResponse({ status: 'ok', channel: 'email', resendAfter: OTP_RESEND_COOLDOWN_SECONDS });
+    bumpCounter(cache, poolKey, 21600);
+    return jsonResponse({ status: 'ok', resendAfter: OTP_RESEND_COOLDOWN_SECONDS });
   });
 }
 
 function handleVerifyOtp(e) {
-  var who = parseLoginId(e.parameter.id || e.parameter.phone);
+  var phone = cleanInput(e.parameter.phone, 20);
   var otp = cleanInput(e.parameter.otp, 10);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!who || !/^[0-9]{6}$/.test(otp) || !deviceId) {
-    return jsonResponse({ status: 'error', message: 'Enter the 6-digit code' });
+  if (!/^\+91[6-9][0-9]{9}$/.test(phone) || !/^[0-9]{6}$/.test(otp) || !deviceId) {
+    return jsonResponse({ status: 'error', message: 'Enter the 6-digit OTP' });
   }
 
   return withLock(function () {
     var cache = CacheService.getScriptCache();
-    var otpKey = 'otp_' + who.id;
+    var otpKey = 'otp_' + phone;
     var raw = cache.get(otpKey);
     if (!raw) {
-      return jsonResponse({ status: 'error', message: 'Code expired or not requested. Please request a new code.' });
+      return jsonResponse({ status: 'error', message: 'OTP expired or not requested. Please request a new OTP.' });
     }
     var rec = JSON.parse(raw);
     var now = Date.now();
 
-    if (rec.h !== otpHash(who.id, otp)) {
+    if (rec.h !== otpHash(phone, otp)) {
       rec.attempts = (rec.attempts || 0) + 1;
       if (rec.attempts >= OTP_MAX_VERIFY_ATTEMPTS) {
         cache.remove(otpKey);
-        return jsonResponse({ status: 'error', message: 'Too many wrong attempts. Please request a new code.' });
+        return jsonResponse({ status: 'error', message: 'Too many wrong attempts. Please request a new OTP.' });
       }
       var ttlLeft = OTP_TTL_SECONDS - Math.floor((now - rec.sentAt) / 1000);
       if (ttlLeft < 1) {
         cache.remove(otpKey);
-        return jsonResponse({ status: 'error', message: 'Code expired. Please request a new code.' });
+        return jsonResponse({ status: 'error', message: 'OTP expired. Please request a new OTP.' });
       }
       cache.put(otpKey, JSON.stringify(rec), ttlLeft);
-      return jsonResponse({ status: 'error', message: 'Wrong code (' + (OTP_MAX_VERIFY_ATTEMPTS - rec.attempts) + ' tries left)' });
+      return jsonResponse({ status: 'error', message: 'Wrong OTP (' + (OTP_MAX_VERIFY_ATTEMPTS - rec.attempts) + ' tries left)' });
     }
 
-    cache.remove(otpKey); // one-time: this code can never be used again
+    cache.remove(otpKey); // one-time: this OTP can never be used again
 
-    // Correct code. A new number/email is signed up automatically; an existing one just logs in.
-    // Either way THIS device becomes the one and only active device for the account.
-    var done = loginAccount(who.id, deviceId);
-    return jsonResponse({ status: 'ok', registered: done.registered });
-  });
-}
-
-/** Signs a verified account in on this device (creating the account first if it is new).
- * ONE ACCOUNT = ONE DEVICE: this device's id becomes the account's ActiveDeviceId, which signs every
- * other device out the next time it checks its session. Call with the script lock held. */
-function loginAccount(id, deviceId) {
-  var now = Date.now();
-  var sheet = getUsersSheet();
-  var rowNum = findUserRow(sheet, id);
-  if (rowNum === -1) {
-    sheet.appendRow([safeCell(id), '', safeCell(deviceId), now, 0, 0]);
-    return { registered: true };
-  }
-  sheet.getRange(rowNum, 3, 1, 4).setValues([[safeCell(deviceId), now, 0, 0]]);
-  return { registered: false };
-}
-
-/**
- * "Sign in with Google" - no password, no code. The app gets a Google ID token on the phone and sends it
- * here. We ask GOOGLE to check it (tokeninfo) and only accept it when it was issued for OUR app
- * (audience = GOOGLE_WEB_CLIENT_ID), is not expired and the email is verified. The account id is then the
- * verified Google email - the same id the email-code login uses, so both lead to the same account.
- * Script Property needed: GOOGLE_WEB_CLIENT_ID (the "Web application" OAuth client id, see GOOGLE_LOGIN_SETUP.md).
- */
-function handleGoogleLogin(e) {
-  var idToken = String(e.parameter.idToken || '').trim();
-  var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!idToken || idToken.length > 6000 || !deviceId) {
-    return jsonResponse({ status: 'error', message: 'Google sign-in failed. Please try again.' });
-  }
-  var clientId = PropertiesService.getScriptProperties().getProperty('GOOGLE_WEB_CLIENT_ID');
-  if (!clientId) {
-    return jsonResponse({ status: 'error', message: 'Google sign-in is not set up on the server yet' });
-  }
-
-  var cache = CacheService.getScriptCache();
-  var tries = readCounter(cache, 'ggl_d_' + deviceId);
-  if (tries >= 20) {
-    return jsonResponse({ status: 'error', message: 'Too many sign-in attempts. Try again after some time.' });
-  }
-  bumpCounter(cache, 'ggl_d_' + deviceId, 3600);
-
-  var info;
-  try {
-    // POST (not a long URL) so even a large token is accepted.
-    var res = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo', {
-      method: 'post',
-      payload: { id_token: idToken },
-      muteHttpExceptions: true
-    });
-    if (res.getResponseCode() !== 200) {
-      return jsonResponse({ status: 'error', message: 'Google sign-in could not be verified. Please try again.' });
+    // Correct OTP - this device becomes the one and only active device for this number.
+    var sheet = getUsersSheet();
+    var rowNum = findUserRow(sheet, phone);
+    if (rowNum === -1) {
+      sheet.appendRow([safeCell(phone), '', safeCell(deviceId), now, 0, 0]);
+      return jsonResponse({ status: 'ok', registered: true });
     }
-    info = JSON.parse(res.getContentText());
-  } catch (err) {
-    return jsonResponse({ status: 'error', message: 'Could not reach Google. Please try again.' });
-  }
-
-  var issuerOk = info && (info.iss === 'accounts.google.com' || info.iss === 'https://accounts.google.com');
-  var emailVerified = info && (info.email_verified === true || String(info.email_verified) === 'true');
-  var notExpired = info && Number(info.exp) * 1000 > Date.now();
-  if (!info || info.aud !== clientId || !issuerOk || !emailVerified || !notExpired || !info.email) {
-    return jsonResponse({ status: 'error', message: 'Google sign-in was rejected for this app. Please try again.' });
-  }
-  var who = parseLoginId(info.email);
-  if (!who || who.type !== 'email') {
-    return jsonResponse({ status: 'error', message: 'This Google account has no usable email.' });
-  }
-
-  return withLock(function () {
-    var done = loginAccount(who.id, deviceId);
-    return jsonResponse({ status: 'ok', registered: done.registered, email: who.id });
+    sheet.getRange(rowNum, 3, 1, 4).setValues([[safeCell(deviceId), now, 0, 0]]);
+    return jsonResponse({ status: 'ok', registered: false });
   });
 }
 
 function handleResetPin(e) {
-  var phone = cleanInput(e.parameter.phone, 100);
+  var phone = cleanInput(e.parameter.phone, 20);
   var newPin = cleanInput(e.parameter.newPin, 10);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
 
@@ -1002,7 +959,7 @@ function handleResetPin(e) {
 }
 
 function handleCheckSession(e) {
-  var phone = cleanInput(e.parameter.phone, 100);
+  var phone = cleanInput(e.parameter.phone, 20);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!phone || !deviceId) {
     return jsonResponse({ status: 'error', message: 'missing params' });
@@ -1036,7 +993,7 @@ var TRIAL_DEVICE_HEADERS = ['DeviceId', 'Phone', 'StartedAt'];
  *    RESUMED with its original start time - it is never restarted or extended.
  */
 function handleStartTrial(e) {
-  var phone = cleanInput(e.parameter.phone, 100);
+  var phone = cleanInput(e.parameter.phone, 20);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!phone || !deviceId) {
     return jsonResponse({ status: 'error', message: 'missing params' });
@@ -1047,6 +1004,12 @@ function handleStartTrial(e) {
     var devSheet = getOrCreateSheet('TrialDevices', TRIAL_DEVICE_HEADERS);
     var rowNum = findUserRow(sheet, phone);
     var now = Date.now();
+
+    // SECURITY: a trial may only be started by the device that just passed OTP for this number.
+    // Rows in Users are only ever created by handleVerifyOtp, so an unverified phone has no row.
+    if (rowNum === -1 || String(sheet.getRange(rowNum, 3).getValue()).trim() !== deviceId) {
+      return jsonResponse({ status: 'error', message: 'Please log in with OTP first' });
+    }
 
     var trialUsed = false;
     var usedAt = 0;
@@ -1078,11 +1041,7 @@ function handleStartTrial(e) {
       }
     }
 
-    if (rowNum === -1) {
-      sheet.appendRow([safeCell(phone), '', safeCell(deviceId), now, 0, 0, true, now]);
-    } else {
-      sheet.getRange(rowNum, 7, 1, 2).setValues([[true, now]]);
-    }
+    sheet.getRange(rowNum, 7, 1, 2).setValues([[true, now]]);
     devSheet.appendRow([safeCell(deviceId), safeCell(phone), now]);
     return jsonResponse({ status: 'ok', startedAt: now });
   });
@@ -1090,11 +1049,16 @@ function handleStartTrial(e) {
 
 /** Lets a freshly installed / newly logged-in app learn whether this number already has a trial. */
 function handleTrialInfo(e) {
-  var phone = cleanInput(e.parameter.phone, 100);
+  var phone = cleanInput(e.parameter.phone, 20);
   if (!phone) return jsonResponse({ status: 'error', message: 'missing phone' });
+  var deviceId = cleanInput(e.parameter.deviceId, 200);
   var sheet = getUsersSheet();
   var rowNum = findUserRow(sheet, phone);
-  if (rowNum === -1) return jsonResponse({ status: 'ok', used: false });
+  // SECURITY: identical answer for unknown numbers and for callers that are not this number's
+  // logged-in device, so the endpoint cannot be used to discover who has an account / trial.
+  if (rowNum === -1 || !deviceId || String(sheet.getRange(rowNum, 3).getValue()).trim() !== deviceId) {
+    return jsonResponse({ status: 'ok', used: false });
+  }
   var row = sheet.getRange(rowNum, 1, 1, 8).getValues()[0];
   var used = row[6] === true || String(row[6]).toUpperCase() === 'TRUE';
   if (!used) return jsonResponse({ status: 'ok', used: false });

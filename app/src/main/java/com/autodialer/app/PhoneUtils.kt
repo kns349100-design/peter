@@ -16,7 +16,8 @@ object PhoneUtils {
             digits.length == 10 -> "91$digits"
             digits.length == 11 && digits.startsWith("0") -> "91${digits.substring(1)}"
             digits.length == 12 && digits.startsWith("91") -> digits
-            digits.length == 13 && digits.startsWith("091") -> "91${digits.substring(2)}"
+            digits.length == 13 && digits.startsWith("091") -> "91${digits.substring(3)}"
+            digits.length == 14 && digits.startsWith("0091") -> "91${digits.substring(4)}"
             else -> digits
         }
     }
