@@ -1,0 +1,367 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:paddingBottom="86dp"
+        android:clipToPadding="false">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <!-- Top bar: settings gear (top-left) | title | load-list icon (top-right) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/btnSettings"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:background="@drawable/bg_avatar"
+                    android:gravity="center"
+                    android:textColor="@color/text_primary_dark"
+                    android:textSize="19sp"
+                    android:text="⚙"/>
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="AutoDialer"
+                    android:textStyle="bold"
+                    android:textColor="@color/text_primary_dark"
+                    android:textSize="19sp"/>
+
+                <TextView
+                    android:id="@+id/btnLoadListTop"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_neon_download"
+                    android:gravity="center"
+                    android:textColor="@color/text_primary_dark"
+                    android:textSize="17sp"
+                    android:text="⬇"/>
+            </LinearLayout>
+
+            <!-- 3 boxes: Paste / File / Image -->
+            <LinearLayout
+                android:id="@+id/rowImportBoxes"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="26dp">
+
+                <LinearLayout
+                    android:id="@+id/btnPasteClipboard"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:gravity="center"
+                    android:background="@drawable/bg_neon_import_card"
+                    android:padding="18dp">
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textSize="24sp"
+                        android:text="📋"/>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:textColor="@color/text_primary_dark"
+                        android:textSize="12sp"
+                        android:text="Paste"/>
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/btnImportFile"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:gravity="center"
+                    android:layout_marginStart="10dp"
+                    android:background="@drawable/bg_neon_import_card"
+                    android:padding="18dp">
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textSize="24sp"
+                        android:text="📁"/>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:textColor="@color/text_primary_dark"
+                        android:textSize="12sp"
+                        android:text="File"/>
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/btnImportImage"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:gravity="center"
+                    android:layout_marginStart="10dp"
+                    android:background="@drawable/bg_neon_import_card"
+                    android:padding="18dp">
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textSize="24sp"
+                        android:text="🖼"/>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:textColor="@color/text_primary_dark"
+                        android:textSize="12sp"
+                        android:text="Image"/>
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- List summary box: appears only when a list is loaded. Shows total vs called
+                 count (or "Calling: ..." while a call is live), and a cross icon to remove the
+                 list. This NEVER disappears on its own - only when the cross is tapped
+                 (with confirmation) or the whole list finishes. -->
+            <LinearLayout
+                android:id="@+id/llListSummary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_card"
+                android:padding="14dp"
+                android:layout_marginTop="14dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/tvListSummaryCount"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/text_primary_dark"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:text="0 numbers • 0 called"/>
+
+                <TextView
+                    android:id="@+id/btnRemoveList"
+                    android:layout_width="34dp"
+                    android:layout_height="34dp"
+                    android:background="@drawable/bg_pill_remove_list"
+                    android:gravity="center"
+                    android:textColor="@color/no_bg"
+                    android:textStyle="bold"
+                    android:textSize="16sp"
+                    android:text="✕"/>
+            </LinearLayout>
+
+            <!-- Paste box: only shown before a list is loaded (this is where numbers land
+                 after Paste/File/Image, and can be hand-edited before tapping the load icon). -->
+            <LinearLayout
+                android:id="@+id/llPasteArea"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <!-- Decorative divider matching the reference design: dot—line—label—line—dot -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <View
+                        android:layout_width="8dp"
+                        android:layout_height="8dp"
+                        android:background="@drawable/bg_neon_dot"/>
+
+                    <View
+                        android:layout_width="0dp"
+                        android:layout_height="1dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:background="@color/neon_green"/>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:layout_marginEnd="10dp"
+                        android:text="Paste number here"
+                        android:textColor="@color/neon_green"
+                        android:textStyle="bold"
+                        android:textSize="14sp"/>
+
+                    <View
+                        android:layout_width="0dp"
+                        android:layout_height="1dp"
+                        android:layout_weight="1"
+                        android:layout_marginEnd="8dp"
+                        android:background="@color/neon_green"/>
+
+                    <View
+                        android:layout_width="8dp"
+                        android:layout_height="8dp"
+                        android:background="@drawable/bg_neon_dot"/>
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="One per line. Optional name: Rahul, 9876543210"
+                    android:textColor="@color/text_muted_dark"
+                    android:textSize="12sp"/>
+
+                <EditText
+                    android:id="@+id/etNumbers"
+                    android:layout_width="match_parent"
+                    android:layout_height="160dp"
+                    android:gravity="top|start"
+                    android:hint="9876543210&#10;Rahul, 9123456780&#10;..."
+                    android:inputType="textMultiLine"
+                    android:background="@drawable/bg_neon_input"
+                    android:textColor="@color/text_primary_dark"
+                    android:textColorHint="@color/text_muted_dark"
+                    android:padding="14dp"
+                    android:layout_marginTop="10dp"/>
+
+                <TextView
+                    android:id="@+id/tvDuplicateInfo"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/no_bg"
+                    android:textSize="11sp"
+                    android:text=""/>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvNumbersLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="NUMBERS"
+                android:textColor="@color/text_muted_dark"
+                android:textStyle="bold"
+                android:letterSpacing="0.05"
+                android:textSize="12sp"
+                android:visibility="gone"/>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/rvNumbers"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:nestedScrollingEnabled="false"
+                android:layout_marginTop="8dp"/>
+
+        </LinearLayout>
+    </ScrollView>
+
+    <!-- Fixed bottom dock: only Start / Stop, and only visible once a list is loaded. -->
+    <LinearLayout
+        android:id="@+id/dockControls"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="horizontal"
+        android:background="@drawable/bg_dock"
+        android:padding="12dp"
+        android:gravity="center"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/btnStart"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_dock_icon_resume"
+            android:gravity="center"
+            android:padding="14dp"
+            android:textColor="@color/resume_text"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:text="Start"/>
+
+        <TextView
+            android:id="@+id/btnStop"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_dock_icon_no"
+            android:gravity="center"
+            android:padding="14dp"
+            android:textColor="@color/no_text"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:text="STOP"/>
+    </LinearLayout>
+
+    <!-- Full-screen glowing outcome overlay - rows built dynamically at runtime so any
+         number of options (defaults + custom) fit and adjust automatically -->
+    <LinearLayout
+        android:id="@+id/overlayOutcome"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:visibility="gone"
+        android:padding="20dp"
+        android:background="#0A0A0B">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:text="Call ended — choose an option"
+            android:textColor="@color/text_muted_dark"
+            android:textSize="13sp"/>
+
+        <LinearLayout
+            android:id="@+id/outcomeButtonsContainer"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:orientation="vertical"/>
+    </LinearLayout>
+
+    <!-- Small always-visible floating Stop button - stays on top regardless of scroll,
+         so the calling process can be stopped instantly from anywhere on screen -->
+    <TextView
+        android:id="@+id/btnFloatingStop"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="16dp"
+        android:background="@drawable/bg_pill_no"
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp"
+        android:paddingTop="9dp"
+        android:paddingBottom="9dp"
+        android:textColor="@color/no_text"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:elevation="10dp"
+        android:visibility="gone"
+        android:text="⏹ Stop"/>
+
+</FrameLayout>

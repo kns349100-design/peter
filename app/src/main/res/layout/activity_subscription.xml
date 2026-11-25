@@ -1,0 +1,393 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/pricing_bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Pricing plan"
+            android:textStyle="bold"
+            android:textColor="@color/pricing_text_dark"
+            android:textSize="24sp"/>
+
+        <TextView
+            android:id="@+id/tvPlanStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:textColor="@color/pricing_blue"
+            android:textStyle="bold"
+            android:textSize="13sp"
+            android:text="No active plan"/>
+
+        <TextView
+            android:id="@+id/tvTrialInfo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="@color/pricing_text_gray"
+            android:textSize="12sp"
+            android:text=""/>
+
+        <!-- Free trial - shown as a small outlined pill above the paid plans, only
+             visible when a trial is actually available (controlled from Kotlin). -->
+        <TextView
+            android:id="@+id/btnFreeTrial"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_pricing_btn_outline"
+            android:gravity="center"
+            android:padding="14dp"
+            android:textColor="@color/pricing_blue"
+            android:textStyle="bold"
+            android:textSize="13sp"
+            android:text="START FREE — 24 HOURS"
+            android:visibility="gone"/>
+
+        <!-- ===== Plan 1: Hourly (Starter) ===== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_pricing_card"
+            android:padding="22dp"
+            android:layout_marginTop="18dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:text="STARTER"
+                android:textColor="@color/pricing_text_dark"
+                android:textStyle="bold"
+                android:textSize="12sp"
+                android:letterSpacing="0.08"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:text="For a quick trial run before you commit."
+                android:textColor="@color/pricing_text_gray"
+                android:textSize="12sp"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="14dp"
+                android:text="₹9"
+                android:textColor="@color/pricing_blue"
+                android:textStyle="bold"
+                android:textSize="34sp"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="2dp"
+                android:text="for 12 hours"
+                android:textColor="@color/pricing_text_gray"
+                android:textSize="12sp"/>
+
+            <!-- Feature bullets -->
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginTop="18dp" android:gravity="center_vertical">
+                <TextView android:layout_width="20dp" android:layout_height="20dp" android:gravity="center"
+                    android:background="@drawable/bg_pricing_check_blue" android:text="✓" android:textColor="#FFFFFF" android:textSize="11sp"/>
+                <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp" android:text="Unlimited number uploads" android:textColor="@color/pricing_text_dark" android:textSize="13sp"/>
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginTop="10dp" android:gravity="center_vertical">
+                <TextView android:layout_width="20dp" android:layout_height="20dp" android:gravity="center"
+                    android:background="@drawable/bg_pricing_check_blue" android:text="✓" android:textColor="#FFFFFF" android:textSize="11sp"/>
+                <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp" android:text="WhatsApp follow-up" android:textColor="@color/pricing_text_dark" android:textSize="13sp"/>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/btnPay12Hour"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_pricing_btn_outline"
+                android:gravity="center"
+                android:padding="14dp"
+                android:textColor="@color/pricing_blue"
+                android:textStyle="bold"
+                android:textSize="13sp"
+                android:text="GET STARTED"/>
+        </LinearLayout>
+
+        <!-- ===== Plan 2: Monthly (Most Popular / featured, gradient) ===== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_pricing_card_featured"
+            android:padding="24dp"
+            android:layout_marginTop="18dp"
+            android:elevation="8dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:background="@drawable/bg_pricing_badge"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp"
+                android:text="MOST POPULAR"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textSize="10sp"
+                android:letterSpacing="0.08"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center"
+                android:text="For steady daily calling and follow-ups."
+                android:textColor="#E4E9FF"
+                android:textSize="12sp"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="14dp"
+                android:text="₹299"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textSize="38sp"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="2dp"
+                android:text="for 1 month"
+                android:textColor="#D8E0FF"
+                android:textSize="12sp"/>
+
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginTop="18dp" android:gravity="center_vertical">
+                <TextView android:layout_width="20dp" android:layout_height="20dp" android:gravity="center"
+                    android:background="@drawable/bg_pricing_check_white" android:text="✓" android:textColor="#FFFFFF" android:textSize="11sp"/>
+                <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp" android:text="Everything in Starter" android:textColor="#FFFFFF" android:textSize="13sp"/>
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginTop="10dp" android:gravity="center_vertical">
+                <TextView android:layout_width="20dp" android:layout_height="20dp" android:gravity="center"
+                    android:background="@drawable/bg_pricing_check_white" android:text="✓" android:textColor="#FFFFFF" android:textSize="11sp"/>
+                <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp" android:text="Unlimited calls for 30 days" android:textColor="#FFFFFF" android:textSize="13sp"/>
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginTop="10dp" android:gravity="center_vertical">
+                <TextView android:layout_width="20dp" android:layout_height="20dp" android:gravity="center"
+                    android:background="@drawable/bg_pricing_check_white" android:text="✓" android:textColor="#FFFFFF" android:textSize="11sp"/>
+                <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp" android:text="Priority support" android:textColor="#FFFFFF" android:textSize="13sp"/>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/btnPayMonthly"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_pricing_btn_solid_white"
+                android:gravity="center"
+                android:padding="14dp"
+                android:textColor="@color/pricing_blue"
+                android:textStyle="bold"
+                android:textSize="13sp"
+                android:text="GET STARTED"/>
+        </LinearLayout>
+
+        <!-- ===== Plan 3: Yearly (Company) ===== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_pricing_card"
+            android:padding="22dp"
+            android:layout_marginTop="18dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:text="YEARLY"
+                android:textColor="@color/pricing_text_dark"
+                android:textStyle="bold"
+                android:textSize="12sp"
+                android:letterSpacing="0.08"/>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:text="Best value for agencies and teams."
+                android:textColor="@color/pricing_text_gray"
+                android:textSize="12sp"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="14dp"
+                android:text="₹999"
+                android:textColor="@color/pricing_blue"
+                android:textStyle="bold"
+                android:textSize="34sp"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="2dp"
+                android:text="for 1 year"
+                android:textColor="@color/pricing_text_gray"
+                android:textSize="12sp"/>
+
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginTop="18dp" android:gravity="center_vertical">
+                <TextView android:layout_width="20dp" android:layout_height="20dp" android:gravity="center"
+                    android:background="@drawable/bg_pricing_check_blue" android:text="✓" android:textColor="#FFFFFF" android:textSize="11sp"/>
+                <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp" android:text="Everything in Monthly" android:textColor="@color/pricing_text_dark" android:textSize="13sp"/>
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginTop="10dp" android:gravity="center_vertical">
+                <TextView android:layout_width="20dp" android:layout_height="20dp" android:gravity="center"
+                    android:background="@drawable/bg_pricing_check_blue" android:text="✓" android:textColor="#FFFFFF" android:textSize="11sp"/>
+                <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp" android:text="Unlimited calls for 365 days" android:textColor="@color/pricing_text_dark" android:textSize="13sp"/>
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:layout_marginTop="10dp" android:gravity="center_vertical">
+                <TextView android:layout_width="20dp" android:layout_height="20dp" android:gravity="center"
+                    android:background="@drawable/bg_pricing_check_blue" android:text="✓" android:textColor="#FFFFFF" android:textSize="11sp"/>
+                <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp" android:text="Best price per month" android:textColor="@color/pricing_text_dark" android:textSize="13sp"/>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/btnPayYearly"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_pricing_btn_outline"
+                android:gravity="center"
+                android:padding="14dp"
+                android:textColor="@color/pricing_blue"
+                android:textStyle="bold"
+                android:textSize="13sp"
+                android:text="GET STARTED"/>
+        </LinearLayout>
+
+        <!-- Payment status / check -->
+        <TextView
+            android:id="@+id/tvPaymentResult"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:textColor="@color/pricing_text_gray"
+            android:textSize="12sp"
+            android:text=""/>
+
+        <TextView
+            android:id="@+id/btnCheckPayment"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_pricing_btn_outline"
+            android:gravity="center"
+            android:padding="14dp"
+            android:textColor="@color/pricing_blue"
+            android:textStyle="bold"
+            android:textSize="13sp"
+            android:text="Not activated yet? Send screenshot on WhatsApp"
+            android:visibility="gone"/>
+
+        <!-- Referral / coupon code -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="20dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Referral code:"
+                android:textColor="@color/pricing_text_gray"
+                android:textSize="12sp"/>
+
+            <EditText
+                android:id="@+id/etCode"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:hint="Optional"
+                android:textColor="@color/pricing_text_dark"
+                android:textColorHint="@color/pricing_text_gray"
+                android:background="@drawable/bg_pricing_card"
+                android:padding="10dp"
+                android:textSize="12sp"
+                android:layout_marginStart="8dp"/>
+
+            <TextView
+                android:id="@+id/btnRedeem"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_login_button"
+                android:gravity="center"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textSize="12sp"
+                android:text="Apply"/>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvRedeemResult"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:textColor="@color/pricing_text_gray"
+            android:textSize="12sp"
+            android:text=""/>
+
+        <TextView
+            android:id="@+id/tvDeviceId"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:textColor="@color/pricing_text_gray"
+            android:textSize="10sp"
+            android:text="Device ID: -"/>
+
+    </LinearLayout>
+</ScrollView>
