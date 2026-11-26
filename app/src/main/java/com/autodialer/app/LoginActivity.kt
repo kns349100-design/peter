@@ -32,15 +32,12 @@ class LoginActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityLoginBinding
     private lateinit var authManager: AuthManager
+    private lateinit var securePrefs: SecurePrefs
     private val handler = Handler(Looper.getMainLooper())
     private var slowHintRunnable: Runnable? = null
     private var countdownRunnable: Runnable? = null
     private var resendEndTimeMs: Long = 0L
     private var busy = false
-
-    private val pendingPrefs by lazy {
-        getSharedPreferences("login_pending", Context.MODE_PRIVATE)
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,6 +45,7 @@ class LoginActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         authManager = AuthManager(this)
+        securePrefs = SecurePrefs(this)
 
         if (authManager.isLoggedIn()) {
             goToMain()
@@ -135,20 +133,19 @@ class LoginActivity : AppCompatActivity() {
     // ---------------------------------------------------------------- state restore
 
     private fun savePending(email: String) {
-        pendingPrefs.edit()
-            .putString("email", email)
-            .putLong("sentAt", System.currentTimeMillis())
-            .apply()
+        securePrefs.putString(KEY_PENDING_EMAIL, email)
+        securePrefs.putLong(KEY_PENDING_SENT_AT, System.currentTimeMillis())
     }
 
     private fun clearPending() {
-        pendingPrefs.edit().clear().apply()
+        securePrefs.remove(KEY_PENDING_EMAIL)
+        securePrefs.remove(KEY_PENDING_SENT_AT)
     }
 
     /** If an OTP was sent within the last 10 minutes, reopen straight on the OTP step. */
     private fun restorePendingOtpStep() {
-        val email = pendingPrefs.getString("email", null) ?: return
-        val sentAt = pendingPrefs.getLong("sentAt", 0L)
+        val email = securePrefs.getString(KEY_PENDING_EMAIL, null) ?: return
+        val sentAt = securePrefs.getLong(KEY_PENDING_SENT_AT, 0L)
         val ageMs = System.currentTimeMillis() - sentAt
         if (sentAt <= 0L || ageMs !in 0..OTP_VALIDITY_MS) {
             clearPending()
@@ -182,8 +179,7 @@ class LoginActivity : AppCompatActivity() {
             if (clip.itemCount == 0) return
 
             val copiedAt = clip.description?.timestamp ?: 0L
-            val sentAt = pendingPrefs.getLong("sentAt", 0L)
-            // Some OEMs return 0 or negative timestamps; only reject when a valid older timestamp exists
+            val sentAt = securePrefs.getLong(KEY_PENDING_SENT_AT, 0L)
             if (sentAt > 0L && copiedAt > 0L && copiedAt < sentAt) return
 
             val text = clip.getItemAt(0)?.coerceToText(this)?.toString() ?: return
@@ -220,20 +216,21 @@ class LoginActivity : AppCompatActivity() {
         startSlowHint("Still sending - the server can take a few extra seconds, hang on...")
 
         authManager.sendOtp(email) { success, message ->
-            if (isFinishing || isDestroyed) return@sendOtp
-            busy = false
-            cancelSlowHint()
+            if (!isFinishing && !isDestroyed) {
+                busy = false
+                cancelSlowHint()
 
-            if (success) {
-                savePending(email)
-                binding.tvLoginStatus.text =
-                    "OTP sent to ${EmailValidator.mask(email)} - check inbox (and spam)"
-                startResendCountdown(RESEND_SECONDS)
-                pasteFreshOtpFromClipboard()
-            } else {
-                stopCountdown()
-                binding.btnResendOtp.isEnabled = true
-                binding.tvLoginStatus.text = message ?: "Failed to send OTP. Try again."
+                if (success) {
+                    savePending(email)
+                    binding.tvLoginStatus.text =
+                        "OTP sent to ${EmailValidator.mask(email)} - check inbox (and spam)"
+                    startResendCountdown(RESEND_SECONDS)
+                    pasteFreshOtpFromClipboard()
+                } else {
+                    stopCountdown()
+                    binding.btnResendOtp.isEnabled = true
+                    binding.tvLoginStatus.text = message
+                }
             }
         }
     }
@@ -253,18 +250,19 @@ class LoginActivity : AppCompatActivity() {
         startSlowHint("Still verifying - the server can take a few extra seconds, hang on...")
 
         authManager.verifyOtp(email, otp) { success, message ->
-            if (isFinishing || isDestroyed) return@verifyOtp
-            busy = false
-            cancelSlowHint()
-            binding.btnVerifyOtp.isEnabled = true
+            if (!isFinishing && !isDestroyed) {
+                busy = false
+                cancelSlowHint()
+                binding.btnVerifyOtp.isEnabled = true
 
-            if (success) {
-                clearPending()
-                authManager.setLoggedIn(email)
-                goToMain()
-            } else {
-                binding.tvLoginStatus.text = message ?: "Invalid or expired OTP."
-                binding.etOtp.text?.clear()
+                if (success) {
+                    clearPending()
+                    authManager.setLoggedIn(email)
+                    goToMain()
+                } else {
+                    binding.tvLoginStatus.text = message
+                    binding.etOtp.text?.clear()
+                }
             }
         }
     }
@@ -351,6 +349,8 @@ class LoginActivity : AppCompatActivity() {
         private const val RESEND_SECONDS = 30
         private const val OTP_VALIDITY_MS = 10 * 60 * 1000L
         private const val SLOW_HINT_DELAY_MS = 4000L
+        private const val KEY_PENDING_EMAIL = "login_pending_email"
+        private const val KEY_PENDING_SENT_AT = "login_pending_sent_at"
         private val SIX_DIGIT_REGEX = Regex("\\b\\d{6}\\b")
     }
 }
