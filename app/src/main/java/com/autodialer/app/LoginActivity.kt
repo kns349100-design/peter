@@ -145,7 +145,7 @@ class LoginActivity : AppCompatActivity() {
             val text = clip.getItemAt(0)?.text?.toString() ?: return
             val code = Regex("\\b\\d{6}\\b").find(text)?.value ?: return
             binding.etOtp.setText(code) // the TextWatcher then auto-verifies
-        } catch (_: Exception) {
+        } catch (e: Exception) {
         }
     }
 
