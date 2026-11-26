@@ -35,9 +35,12 @@ class LoginActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var slowHintRunnable: Runnable? = null
     private var countdownRunnable: Runnable? = null
+    private var resendEndTimeMs: Long = 0L
     private var busy = false
 
-    private val pendingPrefs by lazy { getSharedPreferences("login_pending", Context.MODE_PRIVATE) }
+    private val pendingPrefs by lazy {
+        getSharedPreferences("login_pending", Context.MODE_PRIVATE)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,19 +59,25 @@ class LoginActivity : AppCompatActivity() {
         tap(binding.btnVerifyOtp) { verifyOtp() }
         tap(binding.btnChangeEmail) { backToEmailEntry() }
 
-        // keyboard "Send" key on the email field = Send OTP
+        // Keyboard "Send" / "Done" key on the email field triggers Send OTP
         binding.etEmail.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEND || actionId == EditorInfo.IME_ACTION_DONE) {
-                requestOtp(); true
-            } else false
+                requestOtp()
+                true
+            } else {
+                false
+            }
         }
 
-        // auto-verify the moment 6 digits are in
+        // Auto-verify as soon as 6 digits are entered
         binding.etOtp.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
-                if ((s?.toString()?.count { it.isDigit() } ?: 0) == 6 && !busy) verifyOtp()
+                val digitCount = s?.count { it.isDigit() } ?: 0
+                if (digitCount == 6 && !busy) {
+                    verifyOtp()
+                }
             }
         })
 
@@ -76,29 +85,46 @@ class LoginActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         cancelSlowHint()
         stopCountdown()
+        handler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) pasteFreshOtpFromClipboard()
+        if (hasFocus) {
+            pasteFreshOtpFromClipboard()
+        }
     }
 
     // ---------------------------------------------------------------- touch feedback
 
-    /** Click handler + visible press animation + vibration tick, so every tap "feels" registered. */
+    /** Click handler + visible press animation + vibration tick. */
     private fun tap(view: View, action: () -> Unit) {
         view.isClickable = true
         view.setOnTouchListener { v, event ->
             when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN ->
-                    v.animate().scaleX(0.95f).scaleY(0.95f).alpha(0.75f).setDuration(70).start()
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
-                    v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(120).start()
+                MotionEvent.ACTION_DOWN -> {
+                    v.animate().cancel()
+                    v.animate()
+                        .scaleX(0.95f)
+                        .scaleY(0.95f)
+                        .alpha(0.75f)
+                        .setDuration(70)
+                        .start()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.animate().cancel()
+                    v.animate()
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .alpha(1f)
+                        .setDuration(120)
+                        .start()
+                }
             }
-            false // let the normal click still fire
+            false
         }
         view.setOnClickListener {
             it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -109,81 +135,105 @@ class LoginActivity : AppCompatActivity() {
     // ---------------------------------------------------------------- state restore
 
     private fun savePending(email: String) {
-        pendingPrefs.edit().putString("email", email).putLong("sentAt", System.currentTimeMillis()).apply()
+        pendingPrefs.edit()
+            .putString("email", email)
+            .putLong("sentAt", System.currentTimeMillis())
+            .apply()
     }
 
     private fun clearPending() {
         pendingPrefs.edit().clear().apply()
     }
 
-    /** If an OTP was sent a few minutes ago, reopen straight on the OTP step. */
+    /** If an OTP was sent within the last 10 minutes, reopen straight on the OTP step. */
     private fun restorePendingOtpStep() {
         val email = pendingPrefs.getString("email", null) ?: return
         val sentAt = pendingPrefs.getLong("sentAt", 0L)
         val ageMs = System.currentTimeMillis() - sentAt
-        if (ageMs !in 0..(10 * 60 * 1000L)) { // OTP is valid for 10 min on the server
-            clearPending(); return
+        if (sentAt <= 0L || ageMs !in 0..OTP_VALIDITY_MS) {
+            clearPending()
+            return
         }
+
         binding.etEmail.setText(email)
         showOtpStep()
         binding.tvLoginStatus.text = "OTP sent to ${EmailValidator.mask(email)} - enter it below"
-        val left = RESEND_SECONDS - (ageMs / 1000).toInt()
-        if (left > 0) startResendCountdown(left) else stopCountdown()
+
+        val elapsedSec = (ageMs / 1000L).toInt()
+        val leftSec = RESEND_SECONDS - elapsedSec
+        if (leftSec > 0) {
+            startResendCountdown(leftSec)
+        } else {
+            stopCountdown()
+            binding.btnResendOtp.isEnabled = true
+        }
     }
 
-    /** If the user just copied the 6-digit code from the mail, fill it in automatically. */
+    /** If the user recently copied the 6-digit code from email, fill it in automatically. */
     private fun pasteFreshOtpFromClipboard() {
+        if (isFinishing || isDestroyed) return
         if (binding.otpSection.visibility != View.VISIBLE || busy) return
         if (!binding.etOtp.text.isNullOrEmpty()) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return // can't tell if the copy is recent
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
         try {
-            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
             val clip = cm.primaryClip ?: return
-            val copiedAt = clip.description.timestamp
+            if (clip.itemCount == 0) return
+
+            val copiedAt = clip.description?.timestamp ?: 0L
             val sentAt = pendingPrefs.getLong("sentAt", 0L)
-            if (sentAt == 0L || copiedAt < sentAt) return // copied before this OTP was sent
-            val text = clip.getItemAt(0)?.text?.toString() ?: return
-            val code = Regex("\\b\\d{6}\\b").find(text)?.value ?: return
-            binding.etOtp.setText(code) // the TextWatcher then auto-verifies
-        } catch (e: Exception) {
+            // Some OEMs return 0 or negative timestamps; only reject when a valid older timestamp exists
+            if (sentAt > 0L && copiedAt > 0L && copiedAt < sentAt) return
+
+            val text = clip.getItemAt(0)?.coerceToText(this)?.toString() ?: return
+            val code = SIX_DIGIT_REGEX.find(text)?.value ?: return
+            binding.etOtp.setText(code) // Triggers TextWatcher -> verifyOtp()
+        } catch (_: Exception) {
+            // Ignore clipboard access errors on restricted OEM builds
         }
     }
 
     // ---------------------------------------------------------------- actions
 
     private fun validEmail(): String? {
-        val email = EmailValidator.normalize(binding.etEmail.text.toString())
-        if (email == null) binding.tvLoginStatus.text = "Enter a valid email address"
+        val email = EmailValidator.normalize(binding.etEmail.text?.toString().orEmpty())
+        if (email == null) {
+            binding.tvLoginStatus.text = "Enter a valid email address"
+        }
         return email
     }
 
     private fun requestOtp() {
         if (busy) return
         val email = validEmail() ?: return
+
         busy = true
         binding.btnSendOtp.isEnabled = false
         binding.btnResendOtp.isEnabled = false
         binding.btnResendOtp.alpha = 0.5f
         binding.btnResendOtp.text = "Sending..."
 
-        // Open the OTP step immediately - do NOT make the user stare at the email screen while
-        // the (slow, free) backend works.
+        // Open the OTP step immediately so the user isn't stuck waiting on a slow backend
         showOtpStep()
         binding.tvLoginStatus.text = "Sending OTP to ${EmailValidator.mask(email)}..."
         startSlowHint("Still sending - the server can take a few extra seconds, hang on...")
 
         authManager.sendOtp(email) { success, message ->
+            if (isFinishing || isDestroyed) return@sendOtp
             busy = false
             cancelSlowHint()
+
             if (success) {
                 savePending(email)
-                binding.tvLoginStatus.text = "OTP sent to ${EmailValidator.mask(email)} - check inbox (and spam)"
+                binding.tvLoginStatus.text =
+                    "OTP sent to ${EmailValidator.mask(email)} - check inbox (and spam)"
                 startResendCountdown(RESEND_SECONDS)
+                pasteFreshOtpFromClipboard()
             } else {
-                // stay on the OTP step so the user can just tap Resend
                 stopCountdown()
                 binding.btnResendOtp.isEnabled = true
-                binding.tvLoginStatus.text = message
+                binding.tvLoginStatus.text = message ?: "Failed to send OTP. Try again."
             }
         }
     }
@@ -191,26 +241,30 @@ class LoginActivity : AppCompatActivity() {
     private fun verifyOtp() {
         if (busy) return
         val email = validEmail() ?: return
-        val otp = binding.etOtp.text.toString().filter { it.isDigit() }
+        val otp = binding.etOtp.text?.toString()?.filter { it.isDigit() }.orEmpty()
         if (otp.length != 6) {
             binding.tvLoginStatus.text = "Enter the 6-digit OTP"
             return
         }
+
         busy = true
         binding.btnVerifyOtp.isEnabled = false
         binding.tvLoginStatus.text = "Verifying..."
         startSlowHint("Still verifying - the server can take a few extra seconds, hang on...")
+
         authManager.verifyOtp(email, otp) { success, message ->
+            if (isFinishing || isDestroyed) return@verifyOtp
             busy = false
             cancelSlowHint()
             binding.btnVerifyOtp.isEnabled = true
+
             if (success) {
                 clearPending()
                 authManager.setLoggedIn(email)
                 goToMain()
             } else {
-                binding.tvLoginStatus.text = message
-                binding.etOtp.text?.clear() // ready to type / paste again
+                binding.tvLoginStatus.text = message ?: "Invalid or expired OTP."
+                binding.etOtp.text?.clear()
             }
         }
     }
@@ -238,19 +292,23 @@ class LoginActivity : AppCompatActivity() {
 
     private fun startResendCountdown(seconds: Int) {
         stopCountdown()
-        var left = seconds
+        resendEndTimeMs = System.currentTimeMillis() + seconds.coerceAtLeast(0) * 1000L
+
         val runnable = object : Runnable {
             override fun run() {
-                if (left > 0) {
+                if (isFinishing || isDestroyed) return
+                val remainingMs = resendEndTimeMs - System.currentTimeMillis()
+                val leftSec = ((remainingMs + 999L) / 1000L).toInt()
+                if (leftSec > 0) {
                     binding.btnResendOtp.isEnabled = false
                     binding.btnResendOtp.alpha = 0.5f
-                    binding.btnResendOtp.text = "Resend OTP in ${left}s"
-                    left--
-                    handler.postDelayed(this, 1000)
+                    binding.btnResendOtp.text = "Resend OTP in ${leftSec}s"
+                    handler.postDelayed(this, 250L)
                 } else {
                     binding.btnResendOtp.isEnabled = true
                     binding.btnResendOtp.alpha = 1f
                     binding.btnResendOtp.text = "Resend OTP"
+                    countdownRunnable = null
                 }
             }
         }
@@ -261,6 +319,7 @@ class LoginActivity : AppCompatActivity() {
     private fun stopCountdown() {
         countdownRunnable?.let { handler.removeCallbacks(it) }
         countdownRunnable = null
+        resendEndTimeMs = 0L
         binding.btnResendOtp.alpha = 1f
         binding.btnResendOtp.text = "Resend OTP"
     }
@@ -268,9 +327,13 @@ class LoginActivity : AppCompatActivity() {
     /** Shows a reassuring message if the backend hasn't responded within a few seconds. */
     private fun startSlowHint(message: String) {
         cancelSlowHint()
-        val runnable = Runnable { binding.tvLoginStatus.text = message }
+        val runnable = Runnable {
+            if (!isFinishing && !isDestroyed) {
+                binding.tvLoginStatus.text = message
+            }
+        }
         slowHintRunnable = runnable
-        handler.postDelayed(runnable, 4000)
+        handler.postDelayed(runnable, SLOW_HINT_DELAY_MS)
     }
 
     private fun cancelSlowHint() {
@@ -286,5 +349,8 @@ class LoginActivity : AppCompatActivity() {
     companion object {
         /** Keep in sync with OTP_RESEND_COOLDOWN_SECONDS in backend/Code.gs. */
         private const val RESEND_SECONDS = 30
+        private const val OTP_VALIDITY_MS = 10 * 60 * 1000L
+        private const val SLOW_HINT_DELAY_MS = 4000L
+        private val SIX_DIGIT_REGEX = Regex("\\b\\d{6}\\b")
     }
 }
