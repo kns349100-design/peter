@@ -159,14 +159,7 @@ class CallSequencerConcurrencyTest {
         all.forEach { it.join(10_000); assertFalse("deadlock / stuck thread", it.isAlive) }
 
         // drain: finish whatever is left, single-threaded, like a calm user pressing Start repeatedly
-        var guard = 0
-        var idx = seq.continueSequence()
-        while (idx != null && guard++ < 10 * n) {
-            if (placed.get(idx) > 0) doubleDial.incrementAndGet()
-            if (seq.markDialIssued(idx)) placed.incrementAndGet(idx)
-            seq.onCallConnected(); seq.onCallEnded()
-            idx = seq.continueSequence()      // also retries leads whose dial was dropped (ABORTED)
-        }
+        calmDrain(seq, n, placed, doubleDial)
         val totalPlaced = (0 until n).sumOf { placed.get(it) }
         assertTrue("storm was vacuous: only $totalPlaced calls placed", totalPlaced > 100)
 
@@ -177,6 +170,47 @@ class CallSequencerConcurrencyTest {
         assertEquals(n, c.values.sum())
         assertEquals("a lead was lost/stuck", 0, (c[CallSequencer.Status.PENDING] ?: 0) + (c[CallSequencer.Status.CALLING] ?: 0))
         assertEquals(0, seq.inFlightCount())
+    }
+
+    /**
+     * What a calm user does after the chaos: the phone call that was still in flight when everything stopped
+     * ends (OFFHOOK -> IDLE), THEN Start is pressed until nothing is left. Skipping the first step is a test
+     * bug, not a sequencer bug: continueSequence() correctly refuses to start a second call while one is active
+     * (on a slow 2-core CI machine the storm threads often stop in the middle of a call).
+     */
+    private fun calmDrain(seq: CallSequencer, n: Int, placed: AtomicIntegerArray, doubleDial: AtomicInteger) {
+        var guard = 0
+        while (guard++ < 10 * n) {
+            seq.onCallConnected(); seq.onCallEnded()           // the in-flight call finishes
+            val idx = seq.continueSequence() ?: break            // null only when nothing is left to dial
+            if (placed.get(idx) > 0) doubleDial.incrementAndGet()
+            if (seq.markDialIssued(idx)) placed.incrementAndGet(idx)
+        }
+    }
+
+    @Test fun `REGRESSION (CI failure) - a call still in flight when the storm stops must not leave leads stuck after a calm drain`() {
+        val n = 50; val seq = CallSequencer(n); val placed = AtomicIntegerArray(n); val dd = AtomicInteger()
+        val first = seq.start()!!; assertTrue(seq.markDialIssued(first)); placed.incrementAndGet(first)   // storm stopped mid-call
+        calmDrain(seq, n, placed, dd)
+        assertEquals(0, dd.get())
+        assertEquals(n, seq.counts()[CallSequencer.Status.COMPLETED]); assertEquals(0, seq.inFlightCount())
+        for (i in 0 until n) assertEquals("lead $i", 1, placed.get(i))
+    }
+
+    @Test fun `a reservation can be confirmed only once - a stale second grant holder loses`() {
+        val seq = CallSequencer(3)
+        val a = seq.start()!!                          // thread A is granted lead 0
+        seq.stop()                                     // aborted before it was placed
+        val b = seq.continueSequence()!!               // thread B is granted lead 0 again
+        assertEquals(a, b)
+        assertTrue("first confirmation wins", seq.markDialIssued(a))
+        assertFalse("the other holder of the same index must NOT also dial it", seq.markDialIssued(b))
+    }
+
+    @Test fun `CONTROL - continueSequence correctly refuses while a call is active (why the old drain stopped early)`() {
+        val seq = CallSequencer(5); val first = seq.start()!!; seq.markDialIssued(first)
+        assertNull("a second call must never start while one is active", seq.continueSequence())
+        assertEquals(1, seq.counts()[CallSequencer.Status.CALLING])
     }
 
     @Test(timeout = 60_000) fun `1 second calls on 1000 leads complete every lead exactly once`() {
