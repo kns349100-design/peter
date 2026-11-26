@@ -65,7 +65,10 @@ class CallSequencer(val total: Int) {
 
     /** Engine calls this right after the dial intent was successfully handed to Android. */
     fun markDialIssued(index: Int): Boolean = synchronized(lock) {
-        if (!active || index != cur || phases[index] != Phase.DIALING) return false
+        // Exclusive: only the FIRST confirmation of a reservation wins. A second caller holding a stale grant for the
+        // same index (e.g. after stop() aborted it and continueSequence() reserved it again) gets false, so one
+        // reservation can never be confirmed - and therefore dialed - twice.
+        if (!active || index != cur || phases[index] != Phase.DIALING || issued[index]) return false
         issued[index] = true
         true
     }
