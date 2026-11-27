@@ -264,5 +264,54 @@ console.log('Razorpay payments');
   ok(ord.filter(r => r[5] === 'activated').length === 2, 'both paid orders are marked activated in the Orders tab');
 }
 
+console.log('Plan follows the email (reinstall / new phone) + disposable emails');
+{
+  const e = makeEnv();
+  const EMB = 'mohan@example.com';
+  // user A logs in on D1, redeems a code, plan is stamped with the account
+  e.sheets.Codes.rows.push(['PAID30', 'MONTHLY', 0, 0, true]);
+  login(e, EM, D1);
+  const r = e.call({ action: 'redeem', code: 'PAID30', deviceId: D1, email: EM });
+  ok(r.status === 'ok', 'redeem with email works');
+  ok(e.sheets.Activations.rows[e.sheets.Activations.rows.length - 1][6] === EM, 'activation row is stamped with the email');
+  // new phone / reinstall with a different ANDROID_ID: log in with same email -> plan comes back
+  login(e, EM, D2);
+  const c2 = e.call({ action: 'check', deviceId: D2, email: EM });
+  ok(c2.status === 'ok' && c2.planType === 'MONTHLY' && c2.expiryAt === r.expiryAt, 'same email on a new device gets the same plan');
+  ok(e.call({ action: 'check', deviceId: D2 }).status === 'not_found', 'new device without email gets nothing');
+  // old device D1 is no longer the owner -> cannot read the plan through the email
+  const c1 = e.call({ action: 'check', deviceId: D1, email: EM });
+  ok(c1.status === 'not_found', 'logged-out old device cannot read the email plan');
+  // a different email on the same (new) device does NOT inherit the plan
+  login(e, EMB, D2);
+  ok(e.call({ action: 'check', deviceId: D2, email: EMB }).status === 'not_found', 'another email on the same device gets no plan');
+  // someone who knows the email but never passed OTP cannot read the plan
+  ok(e.call({ action: 'check', deviceId: 'attacker', email: EM }).status === 'not_found', 'unverified device cannot read an email plan');
+  // legacy row (no account) is claimed by the first verified account on that device
+  const e2 = makeEnv();
+  e2.sheets.Activations.rows.push([D1, 'OLDCODE', Date.now(), Date.now() + 5 * 24 * 3600 * 1000, 'MONTHLY', false]);
+  login(e2, EM, D1);
+  ok(e2.call({ action: 'check', deviceId: D1, email: EM }).status === 'ok', 'legacy device plan still works after login');
+  ok(e2.sheets.Activations.rows[1][6] === EM, 'legacy row is claimed by the email');
+  login(e2, EMB, D1);
+  ok(e2.call({ action: 'check', deviceId: D1, email: EMB }).status === 'not_found', 'claimed plan does not leak to another email');
+  // razorpay with email: plan follows the email
+  const e3 = makeEnv();
+  login(e3, EM, D1);
+  const o = e3.call({ action: 'razorpayCreateOrder', plan: 'MONTHLY', deviceId: D1 });
+  e3.razorOrders[o.orderId].status = 'paid'; e3.razorOrders[o.orderId].amount_paid = 29900;
+  const v = e3.call({ action: 'razorpayVerify', orderId: o.orderId, deviceId: D1, email: EM });
+  ok(v.status === 'ok' && e3.sheets.Activations.rows[1][6] === EM, 'paid order is stamped with the email');
+  login(e3, EM, D2);
+  ok(e3.call({ action: 'check', deviceId: D2, email: EM }).planType === 'MONTHLY', 'paid plan follows the email to a new device');
+  // disposable email domains are refused
+  const e4 = makeEnv();
+  const d = e4.call({ action: 'sendOtp', email: 'abc@mailinator.com', deviceId: D1 });
+  ok(d.status === 'error' && /temporary/i.test(d.message), 'disposable email refused');
+  ok(e4.sentMails.length === 0, 'and no mail was sent');
+  ok(e4.call({ action: 'sendOtp', email: 'abc@sub.yopmail.com', deviceId: D1 }).status === 'error', 'subdomain of a disposable domain refused too');
+  ok(e4.call({ action: 'sendOtp', email: 'abc@gmail.com', deviceId: D1 }).status === 'ok', 'normal gmail still works');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
