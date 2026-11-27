@@ -39,6 +39,15 @@
  */
 
 function doGet(e) {
+  return routeRequest(e);
+}
+
+// POST is supported for clients migrating state-changing actions away from query-string requests.
+function doPost(e) {
+  return routeRequest(e);
+}
+
+function routeRequest(e) {
   try {
     var action = e && e.parameter ? e.parameter.action : null;
     if (action === 'redeem') return handleRedeem(e);
@@ -57,7 +66,8 @@ function doGet(e) {
     return jsonResponse({ status: 'error', message: 'unknown action' });
   } catch (err) {
     // Never let a raw exception escape - the app can only understand JSON.
-    return jsonResponse({ status: 'error', message: 'Server error, please try again' });
+    console.error('doGet failed: ' + (err && err.message ? err.message : err)); // see Apps Script -> Executions
+    return jsonResponse({ status: 'error', message: 'Server error: ' + String(err && err.message ? err.message : err).substring(0, 160) });
   }
 }
 
@@ -139,6 +149,20 @@ function cashfreeHeaders() {
   };
 }
 
+// Cashfree orders are recorded server-side before the checkout URL is returned.
+// Never trust plan/device values supplied again by the app during payment verification.
+var CASHFREE_ORDERS_HEADERS = ['OrderId', 'DeviceId', 'PlanType', 'AmountRupees', 'CreatedAt', 'Status', 'Account'];
+function findCashfreeOrder(orderId) {
+  var sheet = getOrCreateSheet('CashfreeOrders', CASHFREE_ORDERS_HEADERS);
+  var rows = sheet.getDataRange().getValues();
+  for (var i = 1; i < rows.length; i++) {
+    if (String(rows[i][0]) === orderId) {
+      return { sheet: sheet, row: i + 1, values: rows[i] };
+    }
+  }
+  return { sheet: sheet, row: -1, values: null };
+}
+
 /**
  * Creates a Cashfree Order and returns a URL (pointing back at this same Apps Script Web
  * App) that shows a tiny auto-redirecting page using Cashfree's official JS SDK - this is
@@ -151,6 +175,8 @@ function handleCreatePaymentLink(e) {
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   var planType = cleanInput(e.parameter.planType, 20).toUpperCase();
   var phone = cleanInput(e.parameter.phone, 20);
+  var accountKey = optionalAccountKey(e);
+  if (accountKey && !deviceOwnsAccount(accountKey, deviceId)) accountKey = '';
 
   if (!deviceId || !planType) {
     return jsonResponse({ status: 'error', message: 'missing params' });
@@ -165,10 +191,14 @@ function handleCreatePaymentLink(e) {
   if (!props.getProperty('CASHFREE_APP_ID') || !props.getProperty('CASHFREE_SECRET_KEY')) {
     return jsonResponse({ status: 'error', message: 'Cashfree keys backend me set nahi hain' });
   }
+  var checkoutPageUrl = props.getProperty('GITHUB_PAGES_URL');
+  if (!checkoutPageUrl) {
+    return jsonResponse({ status: 'error', message: 'GITHUB_PAGES_URL backend me set nahi hai - CASHFREE_SETUP.md dekho' });
+  }
 
   if (!/^[0-9]{10}$/.test(phone)) phone = '9999999999'; // Cashfree requires a 10-digit phone
 
-  var orderId = 'AD' + planType + deviceId.replace(/[^a-zA-Z0-9]/g, '').slice(-8) + Date.now();
+  var orderId = 'AD' + Date.now() + Utilities.getUuid().replace(/-/g, '').slice(0, 16);
   var customerId = ('cust' + deviceId.replace(/[^a-zA-Z0-9]/g, '')).slice(0, 40);
 
   var orderPayload = {
@@ -205,15 +235,15 @@ function handleCreatePaymentLink(e) {
     return jsonResponse({ status: 'error', message: 'Order nahi ban paya: ' + (order.message || JSON.stringify(order)) });
   }
 
+  // Persist the authoritative order details before exposing the checkout session.
+  var saved = withLock(function () {
+    var sheet = getOrCreateSheet('CashfreeOrders', CASHFREE_ORDERS_HEADERS);
+    sheet.appendRow([safeCell(orderId), safeCell(deviceId), planType, amountRupees, Date.now(), 'created', safeCell(accountKey)]);
+    return true;
+  });
+  if (!saved || (saved.getContent && JSON.parse(saved.getContent()).status !== 'ok')) return saved;
+
   var isProd = PropertiesService.getScriptProperties().getProperty('CASHFREE_ENV') === 'PROD';
-  // Points at a small static page hosted on GitHub Pages (a fixed, whitelist-able domain) -
-  // Apps Script's own content domain changes between deployments, so Cashfree can't whitelist
-  // it reliably. Set GITHUB_PAGES_URL in Script Properties once GitHub Pages is enabled, e.g.
-  // https://<your-github-username>.github.io/<repo-name>/checkout.html
-  var checkoutPageUrl = PropertiesService.getScriptProperties().getProperty('GITHUB_PAGES_URL');
-  if (!checkoutPageUrl) {
-    return jsonResponse({ status: 'error', message: 'GITHUB_PAGES_URL backend me set nahi hai - CASHFREE_SETUP.md dekho' });
-  }
   var payUrl = checkoutPageUrl +
     '?session=' + encodeURIComponent(order.payment_session_id) +
     '&mode=' + (isProd ? 'production' : 'sandbox');
@@ -240,12 +270,34 @@ function handleCheckPayment(e) {
     return jsonResponse({ status: 'error', message: 'Invalid plan type' });
   }
 
+  var requestedAccount = optionalAccountKey(e);
+  if (requestedAccount && !deviceOwnsAccount(requestedAccount, deviceId)) requestedAccount = '';
+
   return withLock(function () {
+    // The order must have been created by this backend for this exact device/plan/amount.
+    var saved = findCashfreeOrder(orderId);
+    if (saved.row < 0) return jsonResponse({ status: 'error', message: 'Order nahi mila' });
+    var savedDevice = String(saved.values[1]).trim();
+    var savedPlan = String(saved.values[2]).trim().toUpperCase();
+    var savedAmount = Number(saved.values[3]);
+    var savedAccount = String(saved.values[6] == null ? '' : saved.values[6]).trim();
+    if (savedDevice !== deviceId || savedPlan !== planType || savedAmount !== expectedAmountRupees) {
+      return jsonResponse({ status: 'error', message: 'Order details do not match this device or plan' });
+    }
+    if (savedAccount && requestedAccount !== savedAccount) {
+      return jsonResponse({ status: 'error', message: 'Please log in with the account used to create this order' });
+    }
+
     // Idempotency: never grant the same payment twice (e.g. if the app retries).
     var actSheet = getSheet('Activations');
     var existing = actSheet.getDataRange().getValues();
     for (var i = 1; i < existing.length; i++) {
       if (String(existing[i][1]) === orderId) {
+        var existingAccount = String(existing[i][6] == null ? '' : existing[i][6]).trim();
+        var sameOwner = existingAccount ? existingAccount === savedAccount : String(existing[i][0]).trim() === deviceId;
+        if (!sameOwner || String(existing[i][4]).toUpperCase() !== planType) {
+          return jsonResponse({ status: 'error', message: 'Payment is already linked to another account' });
+        }
         return jsonResponse({ status: 'ok', expiryAt: Number(existing[i][3]), planType: existing[i][4] });
       }
     }
@@ -270,15 +322,25 @@ function handleCheckPayment(e) {
     if (order.order_status !== 'PAID') {
       return jsonResponse({ status: 'error', message: 'Payment abhi complete nahi hua (status: ' + (order.order_status || 'unknown') + ')' });
     }
-    // Small tolerance for float rounding (e.g. Cashfree returning 9.999999 for 10).
-    if (Number(order.order_amount) < expectedAmountRupees - 0.5) {
-      return jsonResponse({ status: 'error', message: 'Payment amount plan se match nahi karta' });
+    // Compare exact server-stored amount and currency; accepting over/under-payments is unsafe.
+    if (String(order.order_currency || '').toUpperCase() !== 'INR' ||
+        !isFinite(Number(order.order_amount)) || Math.abs(Number(order.order_amount) - savedAmount) > 0.001) {
+      return jsonResponse({ status: 'error', message: 'Payment amount or currency does not match the order' });
     }
 
     var now = Date.now();
-    var expiryAt = grantExpiry(planType, now);
-
-    actSheet.appendRow([safeCell(deviceId), safeCell(orderId), now, expiryAt, planType, false]);
+    var base = now;
+    var prior = actSheet.getDataRange().getValues();
+    for (var j = 1; j < prior.length; j++) {
+      if (!activationBelongs(prior[j], deviceId, savedAccount)) continue;
+      if (isRevokedCell(prior[j][5]) || String(prior[j][4]).toUpperCase() === 'FREE') continue;
+      var exp = Number(prior[j][3]) || 0;
+      if (exp > base) base = exp;
+    }
+    var expiryAt = grantExpiry(planType, base);
+    ensureActivationAccountHeader(actSheet);
+    actSheet.appendRow([safeCell(deviceId), safeCell(orderId), now, expiryAt, planType, false, safeCell(savedAccount)]);
+    saved.sheet.getRange(saved.row, 6).setValue('activated');
 
     return jsonResponse({ status: 'ok', expiryAt: expiryAt, planType: planType });
   });
@@ -435,14 +497,16 @@ function handleRazorpayCreateOrder(e) {
  * Returns {ok, expiryAt, planType, message, orderStatus}. Safe to call any number of times: an order
  * is only ever activated once, and only ever for the device it was created for.
  */
-function activateRazorpayOrder(orderId, deviceId, keys) {
+function activateRazorpayOrder(orderId, deviceId, keys, accountKey) {
   var actSheet = getSheet('Activations');
   var rows = actSheet.getDataRange().getValues();
 
   // Already activated? (idempotency - the same paid order can never grant time twice)
   for (var i = 1; i < rows.length; i++) {
     if (String(rows[i][1]) === orderId) {
-      if (String(rows[i][0]).trim() !== deviceId) {
+      var rowAcc = String(rows[i][6] == null ? '' : rows[i][6]).trim();
+      var sameOwner = (rowAcc && accountKey) ? rowAcc === accountKey : String(rows[i][0]).trim() === deviceId;
+      if (!sameOwner) {
         return { ok: false, message: 'Ye payment kisi aur device par activate ho chuka hai', orderStatus: 'paid' };
       }
       return { ok: true, expiryAt: Number(rows[i][3]), planType: rows[i][4] };
@@ -490,8 +554,9 @@ function activateRazorpayOrder(orderId, deviceId, keys) {
     return { ok: false, message: 'Payment abhi complete nahi hua (status: ' + (order.status || 'unknown') + ')', orderStatus: order.status || 'unknown' };
   }
   var planType = RAZORPAY_AMOUNT_TO_PLAN[Number(order.amount)];
-  if (!planType || order.currency !== 'INR') {
-    return { ok: false, message: 'Payment amount kisi plan se match nahi karta', orderStatus: 'unknown' };
+  var notedPlan = order.notes && order.notes.plan ? String(order.notes.plan).trim().toUpperCase() : '';
+  if (!planType || order.currency !== 'INR' || (notedPlan && notedPlan !== planType)) {
+    return { ok: false, message: 'Payment amount ya plan order se match nahi karta', orderStatus: 'unknown' };
   }
 
   // Money-safety: extend from whichever is later - now or this device's current expiry - so a payment
@@ -499,7 +564,7 @@ function activateRazorpayOrder(orderId, deviceId, keys) {
   var now = Date.now();
   var base = now;
   for (var j = 1; j < rows.length; j++) {
-    if (String(rows[j][0]).trim() !== deviceId) continue;
+    if (!activationBelongs(rows[j], deviceId, accountKey)) continue;
     var revoked = rows[j][5];
     if (revoked === true || String(revoked).toUpperCase() === 'TRUE') continue;
     if (String(rows[j][4]).toUpperCase() === 'FREE') continue;
@@ -507,7 +572,8 @@ function activateRazorpayOrder(orderId, deviceId, keys) {
     if (exp > base) base = exp;
   }
   var expiryAt = grantExpiry(planType, base);
-  actSheet.appendRow([safeCell(deviceId), safeCell(orderId), now, expiryAt, planType, false]);
+  ensureActivationAccountHeader(actSheet);
+  actSheet.appendRow([safeCell(deviceId), safeCell(orderId), now, expiryAt, planType, false, safeCell(accountKey || '')]);
   try { setOrderStatus(orderId, 'activated'); } catch (err) { /* the activation itself is what matters */ }
   return { ok: true, expiryAt: expiryAt, planType: planType };
 }
@@ -521,8 +587,10 @@ function handleRazorpayVerify(e) {
   var keys = razorpayKeys();
   if (!keys) return jsonResponse({ status: 'error', message: 'Payment server is not configured' });
 
+  var vAccount = optionalAccountKey(e);
+  if (vAccount && !deviceOwnsAccount(vAccount, deviceId)) vAccount = '';
   return withLock(function () {
-    var r = activateRazorpayOrder(orderId, deviceId, keys);
+    var r = activateRazorpayOrder(orderId, deviceId, keys, vAccount);
     if (r.ok) return jsonResponse({ status: 'ok', expiryAt: r.expiryAt, planType: r.planType });
     return jsonResponse({ status: 'error', message: r.message, orderStatus: r.orderStatus });
   });
@@ -538,6 +606,8 @@ function handleRazorpaySync(e) {
   var keys = razorpayKeys();
   if (!keys) return jsonResponse({ status: 'error', message: 'Payment server is not configured' });
 
+  var sAccount = optionalAccountKey(e);
+  if (sAccount && !deviceOwnsAccount(sAccount, deviceId)) sAccount = '';
   return withLock(function () {
     var now = Date.now();
     var mine = [];
@@ -551,7 +621,7 @@ function handleRazorpaySync(e) {
 
     var activated = 0;
     for (var m = 0; m < mine.length; m++) {
-      var r = activateRazorpayOrder(mine[m].orderId, deviceId, keys);
+      var r = activateRazorpayOrder(mine[m].orderId, deviceId, keys, sAccount);
       if (r.ok) {
         activated++;
         continue;
@@ -563,7 +633,7 @@ function handleRazorpaySync(e) {
         setOrderStatus(mine[m].orderId, 'expired');
       }
     }
-    var latest = latestActivationFor(deviceId);
+    var latest = sAccount ? latestActivationForAccount(deviceId, sAccount, true) : latestActivationFor(deviceId);
     if (latest.expiryAt === 0) return jsonResponse({ status: 'not_found', activated: activated });
     return jsonResponse({ status: 'ok', expiryAt: latest.expiryAt, planType: latest.planType, activated: activated });
   });
@@ -587,6 +657,9 @@ function handleRedeem(e) {
   if (!code || !deviceId) {
     return jsonResponse({ status: 'error', message: 'missing params' });
   }
+
+  var redeemAccount = optionalAccountKey(e);
+  if (redeemAccount && !deviceOwnsAccount(redeemAccount, deviceId)) redeemAccount = '';
 
   return withLock(function () {
     var cache = CacheService.getScriptCache();
@@ -620,7 +693,8 @@ function handleRedeem(e) {
       codesSheet.getRange(i + 1, 4).setValue(usedCount + 1);
 
       var actSheet = getSheet('Activations');
-      actSheet.appendRow([safeCell(deviceId), safeCell(code), now, expiryAt, type, false]);
+      ensureActivationAccountHeader(actSheet);
+      actSheet.appendRow([safeCell(deviceId), safeCell(code), now, expiryAt, type, false, safeCell(redeemAccount)]);
 
       return jsonResponse({ status: 'ok', expiryAt: expiryAt, planType: type });
     }
@@ -635,27 +709,85 @@ function handleCheck(e) {
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!deviceId) return jsonResponse({ status: 'error', message: 'missing deviceId' });
 
-  var actSheet = getSheet('Activations');
-  var data = actSheet.getDataRange().getValues();
+  var accountKey = optionalAccountKey(e);
+  // The plan of an email can only be read by the device logged in for that email.
+  if (accountKey && !deviceOwnsAccount(accountKey, deviceId)) accountKey = '';
 
-  var latestExpiry = 0;
-  var latestType = '';
-
-  for (var i = 1; i < data.length; i++) {
-    var row = data[i];
-    if (String(row[0]).trim() !== deviceId) continue;
-    var revoked = row[5];
-    if (revoked === true || String(revoked).toUpperCase() === 'TRUE') continue; // skip revoked rows
-    var expiryAt = Number(row[3]) || 0;
-    if (expiryAt > latestExpiry) {
-      latestExpiry = expiryAt;
-      latestType = row[4];
-    }
-  }
+  var latest = accountKey
+    ? withLockResult(function () { return latestActivationForAccount(deviceId, accountKey, true); })  // claims legacy rows
+    : latestActivationForAccount(deviceId, '', false);
 
   var unclaimed = deviceHasUnclaimedOrders(deviceId);
-  if (latestExpiry === 0) return jsonResponse({ status: 'not_found', hasUnclaimed: unclaimed });
-  return jsonResponse({ status: 'ok', expiryAt: latestExpiry, planType: latestType, hasUnclaimed: unclaimed });
+  if (latest.expiryAt === 0) return jsonResponse({ status: 'not_found', hasUnclaimed: unclaimed });
+  return jsonResponse({ status: 'ok', expiryAt: latest.expiryAt, planType: latest.planType, hasUnclaimed: unclaimed });
+}
+
+/** Like withLock but returns the callback's raw value (withLock wraps HTTP responses). */
+function withLockResult(fn) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('Server is busy, try again in a moment');
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+/* ===================== PLAN <-> EMAIL BINDING =====================
+ * Every new activation is stamped with the account (canonical email) in Activations column G.
+ * A plan therefore follows the EMAIL: reinstall, new phone or factory reset - log in with the same
+ * email (OTP) and the same plan comes back. Rows without an account are legacy rows that still
+ * match by deviceId, and are claimed by the first verified account that checks from that device.
+ * Only the device that is currently logged in for an email may read or use that email's plan. */
+var ACTIVATION_HEADERS = ['DeviceId', 'CodeOrOrder', 'ActivatedAt', 'ExpiryAt', 'PlanType', 'Revoked', 'Account'];
+
+/** Canonical account key for a request, or '' when the app sent no (or an invalid) email. */
+function optionalAccountKey(e) {
+  var raw = cleanInput(e.parameter.email, 260);
+  if (!raw) return '';
+  var a = normalizeEmail(raw);
+  return a ? a.key : '';
+}
+
+/** True only if this device is the one currently logged in (passed the OTP) for this account. */
+function deviceOwnsAccount(accountKey, deviceId) {
+  if (!accountKey || !deviceId) return false;
+  var sheet = getUsersSheet();
+  var rowNum = findUserRow(sheet, accountKey);
+  if (rowNum === -1) return false;
+  return String(sheet.getRange(rowNum, 3).getValue()).trim() === deviceId;
+}
+
+function isRevokedCell(v) { return v === true || String(v).toUpperCase() === 'TRUE'; }
+
+/** Does this Activations row belong to the caller? Stamped rows belong to their account; legacy rows to their device. */
+function activationBelongs(row, deviceId, accountKey) {
+  var rowAccount = String(row[6] == null ? '' : row[6]).trim();
+  if (accountKey) {
+    if (rowAccount) return rowAccount === accountKey;
+    return String(row[0]).trim() === deviceId;               // legacy row, same device
+  }
+  return String(row[0]).trim() === deviceId && !rowAccount;  // old app without email: legacy behaviour
+}
+
+function ensureActivationAccountHeader(sheet) {
+  if (String(sheet.getRange(1, 7).getValue()).trim() === '') sheet.getRange(1, 7).setValue('Account');
+}
+
+/** Latest non-revoked expiry for the caller. Must run with the script lock held when backfill=true. */
+function latestActivationForAccount(deviceId, accountKey, backfill) {
+  var sheet = getSheet('Activations');
+  var data = sheet.getDataRange().getValues();
+  var latestExpiry = 0, latestType = '', claimed = false;
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    if (!activationBelongs(row, deviceId, accountKey)) continue;
+    if (backfill && accountKey && !String(row[6] == null ? '' : row[6]).trim()) {
+      ensureActivationAccountHeader(sheet);
+      sheet.getRange(i + 1, 7).setValue(safeCell(accountKey)); // claim the legacy row for this email
+      claimed = true;
+    }
+    if (isRevokedCell(row[5])) continue;
+    var expiryAt = Number(row[3]) || 0;
+    if (expiryAt > latestExpiry) { latestExpiry = expiryAt; latestType = row[4]; }
+  }
+  return { expiryAt: latestExpiry, planType: latestType, claimed: claimed };
 }
 
 function jsonResponse(obj) {
@@ -677,7 +809,9 @@ function hashPin(pin) {
 }
 
 function getUsersSheet() {
-  return getSheet('Users');
+  // Auto-creates the Users tab (with headers) if it is missing - a missing tab was the cause of
+  // "Server error, please try again" on Send OTP.
+  return getOrCreateSheet('Users', ['Email', 'PinHash', 'ActiveDeviceId', 'UpdatedAt', 'FailedAttempts', 'LockedUntil', 'TrialUsed', 'TrialStartedAt']);
 }
 
 function findUserRow(sheet, account) {
@@ -705,7 +839,7 @@ function findUserRow(sheet, account) {
  */
 var OTP_TTL_SECONDS = 600;
 var OTP_MAX_VERIFY_ATTEMPTS = 5;
-var OTP_RESEND_COOLDOWN_SECONDS = 60;
+var OTP_RESEND_COOLDOWN_SECONDS = 30;
 var OTP_MAX_PER_EMAIL_PER_HOUR = 5;
 var OTP_MAX_PER_DEVICE_PER_HOUR = 10;
 var OTP_MAX_GLOBAL_PER_6H = 30;        // brand-new addresses
@@ -753,13 +887,26 @@ var DISPOSABLE_DOMAINS = {
   'emailondeck.com': 1, 'tempail.com': 1, 'moakt.com': 1, 'mailnesia.com': 1, 'burnermail.io': 1
 };
 
+// More throw-away services + sub-domain matching (abc@x.yopmail.com counts as yopmail.com).
+'guerrillamail.biz guerrillamail.de grr.la guerrillamailblock.com 10minutemail.org temp-mail.io tempmail.net tempail.com yopmail.fr dispostable.com fakeinbox.com maildrop.cc mailnesia.com mintemail.com mohmal.com emailondeck.com spamgourmet.com mytemp.email burnermail.io anonbox.net dropmail.me discard.email moakt.com mailcatch.com tmail.ws tmpmail.org tmpmail.net 1secmail.com 1secmail.net 1secmail.org inboxkitten.com harakirimail.com mail.tm mailsac.com spambox.us trbvm.com emailfake.com fakemail.net crazymailing.com gufum.com mailpoof.com tempinbox.com jetable.org owlymail.com cuvox.de tempr.email email-temp.com temporary-mail.net tempm.com fexpost.com smailpro.com emltmp.com mail-temp.com mailforspam.com trashmail.net trashmail.de'.split(' ').forEach(function (d) { DISPOSABLE_DOMAINS[d] = 1; });
+function isDisposableDomain(domain) {
+  var parts = String(domain || '').toLowerCase().split('.');
+  for (var i = 0; i < parts.length - 1; i++) {
+    if (DISPOSABLE_DOMAINS[parts.slice(i).join('.')]) return true;
+  }
+  return false;
+}
+
+
 /**
  * Returns {display, key, domain} or null.
  *  display = what the user typed (lower-cased) - the OTP is mailed here.
  *  key     = the canonical account id. Two spellings of the SAME inbox must be the same account, otherwise
  *            one person could farm unlimited free trials / extra logins:
- *            - "+tag" is dropped      (rahul+1@x.com  == rahul@x.com)
+ *            - "+tag" is dropped for the app's account-alias policy
  *            - Gmail ignores dots     (r.a.h.u.l@gmail.com == rahul@gmail.com), googlemail.com == gmail.com
+ *            Note: dropping +tags for non-Gmail providers is an app-level alias policy, not a universal
+ *            email-provider guarantee. Change this only together with the client/account migration.
  */
 function normalizeEmail(raw) {
   var s = String(raw == null ? '' : raw).trim().toLowerCase();
@@ -826,7 +973,7 @@ function handleSendOtp(e) {
   if (acct.error) return acct.error;
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!deviceId) return jsonResponse({ status: 'error', message: 'missing params' });
-  if (DISPOSABLE_DOMAINS[acct.domain]) {
+  if (isDisposableDomain(acct.domain)) {
     return jsonResponse({ status: 'error', message: 'Please use your permanent email address (temporary mail services are not allowed)' });
   }
 
@@ -851,12 +998,18 @@ function handleSendOtp(e) {
     }
     // Two tiers: unknown addresses share a small pool, existing customers have their own reserve - so a
     // flood of fake addresses (rotating deviceIds) cannot lock real, registered users out of logging in.
-    var known = findUserRow(getUsersSheet(), acct.key) !== -1;
+    // Cache "known user" so most requests skip the (slow) sheet read. Only positives are cached.
+    var known = cache.get('known_' + acct.key) === '1';
+    if (!known) {
+      known = findUserRow(getUsersSheet(), acct.key) !== -1;
+      if (known) cache.put('known_' + acct.key, '1', 21600);
+    }
     var poolKey = known ? 'otpcnt_gk' : 'otpcnt_g';
     if (readCounter(cache, poolKey) >= (known ? OTP_MAX_KNOWN_PER_6H : OTP_MAX_GLOBAL_PER_6H)) {
       return jsonResponse({ status: 'error', message: 'OTP service is busy right now. Please try again later.' });
     }
-    var quota = MailApp.getRemainingDailyQuota();
+    var quota = 100;
+    try { quota = MailApp.getRemainingDailyQuota(); } catch (qe) { console.error('quota check failed: ' + qe); }
     if (quota < 1 || (!known && quota <= OTP_UNKNOWN_QUOTA_RESERVE)) {
       return jsonResponse({ status: 'error', message: 'OTP service is busy right now. Please try again later.' });
     }
@@ -1020,4 +1173,38 @@ function handleTrialInfo(e) {
   var used = row[6] === true || String(row[6]).toUpperCase() === 'TRUE';
   if (!used) return jsonResponse({ status: 'ok', used: false });
   return jsonResponse({ status: 'ok', used: true, startedAt: Number(row[7]) || 0 });
+}
+
+
+/** Run from the editor to see the REAL error behind "Server error": Run -> debugSendOtp -> View logs. */
+function debugSendOtp() {
+  var out = doGet({ parameter: { action: 'sendOtp', email: 'PUT_YOUR_EMAIL_HERE@gmail.com', deviceId: 'debug-device' } });
+  Logger.log(out.getContent());
+  getUsersSheet(); CacheService.getScriptCache(); Logger.log('Quota left: ' + MailApp.getRemainingDailyQuota());
+}
+
+
+/** RUN THIS ONCE from the editor (Run -> authorizeAll) and click Allow on every prompt.
+ * It asks Google for ALL permissions the web app needs (Sheets, Gmail send, external requests),
+ * which fixes "You do not have permission to call SpreadsheetApp.getActiveSpreadsheet". */
+function authorizeAll() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  Logger.log('Sheet: ' + (ss ? ss.getName() : 'NULL - script is not bound to a Sheet!'));
+  Logger.log('Mail quota left: ' + MailApp.getRemainingDailyQuota());
+  UrlFetchApp.getRequest('https://example.com');   // only builds a request (no network call) - triggers the permission
+  CacheService.getScriptCache().put('auth_test', '1', 60);
+  LockService.getScriptLock();
+  Logger.log('All permissions granted. Now: Deploy -> Manage deployments -> pencil -> New version -> Deploy.');
+}
+
+
+/** SPEED: run setupKeepWarm ONCE from the editor. It adds a free 5-minute trigger that keeps the
+ * web app "warm", so Send OTP no longer pays a slow cold start after the script has been idle. */
+function keepWarm() { CacheService.getScriptCache().get('ping'); }
+function setupKeepWarm() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'keepWarm') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('keepWarm').timeBased().everyMinutes(5).create();
+  Logger.log('Keep-warm trigger installed (every 5 min).');
 }
