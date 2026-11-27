@@ -53,6 +53,28 @@ class SubscriptionManager(private val context: Context) {
     fun deviceId(): String =
         Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown-device"
 
+    /** "&email=..." for the plan endpoints, so the server ties the plan to the logged-in EMAIL
+     * (it follows the account across reinstalls and new phones), or "" when nobody is logged in. */
+    private fun accountQuery(): String {
+        val email = AuthManager(context).email()
+        return if (email.isBlank()) "" else "&email=${URLEncoder.encode(email, "UTF-8")}"
+    }
+
+    /** Call right after a successful login. A different email than the one this install's cached plan /
+     * trial belonged to starts from a clean slate - the real plan and trial of the new email are then
+     * restored from the server by the next status refresh. Same email (e.g. logging in again) keeps everything. */
+    fun bindAccount(email: String) {
+        val bound = prefs.getString("boundEmail", "") ?: ""
+        if (bound == email) return
+        prefs.edit()
+            .remove("cachedExpiry")
+            .remove("cachedPlanType")
+            .remove("trialStartedAt")
+            .remove("lastStatusCheck")
+            .putString("boundEmail", email)
+            .apply()
+    }
+
     fun ensureFirstLaunchRecorded() {
         if (!prefs.contains("firstLaunch")) {
             prefs.edit().putLong("firstLaunch", System.currentTimeMillis()).apply()
@@ -194,9 +216,13 @@ class SubscriptionManager(private val context: Context) {
         val lastChecked = prefs.getLong("lastStatusCheck", 0L)
         if (!force && now - lastChecked < 3 * 60 * 1000) return
         prefs.edit().putLong("lastStatusCheck", now).apply()
+        val currentEmail = AuthManager(context).email()
+        if (currentEmail.isNotBlank() && prefs.getString("boundEmail", "").isNullOrEmpty()) {
+            prefs.edit().putString("boundEmail", currentEmail).apply() // existing user, first run after the update
+        }
         Thread {
             try {
-                val url = "$SCRIPT_URL?action=check&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}"
+                val url = "$SCRIPT_URL?action=check&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}${accountQuery()}"
                 val json = JSONObject(httpGet(url))
                 if (json.optString("status") == "ok") {
                     applyServerPlan(json)
@@ -223,7 +249,7 @@ class SubscriptionManager(private val context: Context) {
     /** Asks the server to re-check every recent order of this device with Razorpay and activate the paid ones. Runs on the caller's (background) thread. */
     private fun syncUnclaimedPayments() {
         try {
-            val url = "$SCRIPT_URL?action=razorpaySync&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}"
+            val url = "$SCRIPT_URL?action=razorpaySync&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}${accountQuery()}"
             val json = JSONObject(httpGet(url))
             if (json.optString("status") == "ok") {
                 applyServerPlan(json)
@@ -357,7 +383,8 @@ class SubscriptionManager(private val context: Context) {
             try {
                 val url = "$SCRIPT_URL?action=redeem" +
                     "&code=${URLEncoder.encode(code, "UTF-8")}" +
-                    "&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}"
+                    "&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}" +
+                    accountQuery()
                 val response = httpGet(url)
                 val json = JSONObject(response)
                 if (json.optString("status") == "ok") {
@@ -460,7 +487,8 @@ class SubscriptionManager(private val context: Context) {
             try {
                 val url = "$SCRIPT_URL?action=razorpayVerify" +
                     "&orderId=${URLEncoder.encode(orderId, "UTF-8")}" +
-                    "&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}"
+                    "&deviceId=${URLEncoder.encode(deviceId(), "UTF-8")}" +
+                    accountQuery()
                 val json = JSONObject(httpGet(url))
                 if (json.optString("status") == "ok") {
                     val expiryAt = json.optLong("expiryAt", 0L)
