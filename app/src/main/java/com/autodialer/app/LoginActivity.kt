@@ -206,6 +206,7 @@ class LoginActivity : AppCompatActivity() {
             binding.btnVerifyOtp.isEnabled = true
             if (success) {
                 clearPending()
+                SubscriptionManager(this).bindAccount(email) // plan + trial follow the email, never the phone
                 authManager.setLoggedIn(email)
                 goToMain()
             } else {
