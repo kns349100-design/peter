@@ -37,7 +37,7 @@ class LoginActivity : AppCompatActivity() {
     private var countdownRunnable: Runnable? = null
     private var busy = false
 
-    private val pendingPrefs by lazy { getSharedPreferences("login_pending", Context.MODE_PRIVATE) }
+    private val pendingPrefs by lazy { SecurePrefs.open(applicationContext, "login_pending") }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
