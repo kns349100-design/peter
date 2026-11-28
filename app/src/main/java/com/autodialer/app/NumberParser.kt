@@ -46,11 +46,12 @@ object NumberParser {
         val candidates = extractPhoneNumbers(line).toList()
         if (candidates.isEmpty()) return emptyList()
 
-        var leftover = spaced.replace(line) { m ->
+        // Strip plain 10-13 digit numbers FIRST so two adjacent numbers never merge into one spaced match
+        var leftover = plainRun.replace(line, " ")
+        leftover = spaced.replace(leftover) { m ->
             val digits = m.value.filter { it.isDigit() }
             if (digits.length in 10..13 && !dateLike.matches(m.value.trim())) " " else m.value
         }
-        leftover = plainRun.replace(leftover, " ")
         leftover = leftover.trim(' ', ',', '-', '|', '\t', ':', ';', '(', ')', '[', ']', '+', '.').trim()
         val label = leftover.split(",")
             .map { it.trim() }
@@ -60,7 +61,7 @@ object NumberParser {
             if (!PhoneUtils.isValidDialableNumber(token)) return@mapIndexedNotNull null
             val finalLabel = when {
                 !label.isNullOrBlank() && candidates.size == 1 -> label
-                !label.isNullOrBlank() -> "$label${i + 1}"
+                !label.isNullOrBlank() -> "$label ${i + 1}"
                 else -> "Lead ${startIndex + i}"
             }
             Lead(finalLabel, token)
