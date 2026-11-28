@@ -1,7 +1,7 @@
 package com.autodialer.app
 
 object PhoneUtils {
-    private val REPEATED_DIGITS = Regex("^(\\d)\\1{9}$")
+    private val REPEATED_DIGITS = Regex("^(\\d)\\1{9,}$")
 
     /**
      * Normalizes a phone number to canonical "91XXXXXXXXXX" digits-only form for
@@ -20,24 +20,19 @@ object PhoneUtils {
     }
 
     /**
-     * Validates that a parsed number is a genuine dialable Indian mobile or landline
-     * number (rejects dates, IDs, repeated digits like 9999999999, and invalid prefixes).
+     * Validates that a parsed number is a genuine dialable phone number
+     * (10 to 13 digits, rejecting all-same repeated digits like 9999999999 or 0000000000).
      */
     fun isValidDialableNumber(phone: String): Boolean {
+        val rawDigits = phone.filter { it.isDigit() }
+        if (rawDigits.length !in 10..13) return false
+        if (REPEATED_DIGITS.matches(rawDigits)) return false
         val normalized = normalize(phone)
         if (normalized.length == 12 && normalized.startsWith("91")) {
             val subscriber = normalized.substring(2)
             if (REPEATED_DIGITS.matches(subscriber)) return false
-            // Indian mobile numbers start with 6, 7, 8, or 9; landlines with STD code start with 1-8 (never 0 or 9-prefixed fake sequences)
-            val first = subscriber.first()
-            if (first !in '2'..'9') return false
-            // Reject obvious sequential dummy numbers
-            if (subscriber == "1234567890" || subscriber == "9876543210") return false
-            return true
         }
-        // International numbers with country code (11 to 13 digits, not starting with 0)
-        val rawDigits = phone.filter { it.isDigit() }
-        return rawDigits.length in 11..13 && !rawDigits.startsWith("0") && !REPEATED_DIGITS.containsMatchIn(rawDigits)
+        return true
     }
 
     /** Formats a number cleanly for WhatsApp wa.me links (digits with country code, no '+'). */
