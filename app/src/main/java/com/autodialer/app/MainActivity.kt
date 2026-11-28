@@ -7,8 +7,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
+import android.provider.Settings
+import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -17,8 +21,6 @@ import com.autodialer.app.databinding.ActivityMainBinding
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import java.io.BufferedReader
-import java.io.InputStreamReader
 
 class MainActivity : AppCompatActivity(), CallEngineListener {
 
@@ -33,13 +35,10 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
     private lateinit var authManager: AuthManager
     private lateinit var numberDraftStore: NumberDraftStore
 
-    // True right after we've sent the user to WhatsApp for the INFO outcome - the next call is
-    // dialed only once they actually come back to the app (onResume), i.e. after tapping Send.
     private var pendingInfoOutcome = false
+    private var isLoadingList = false
+    private var lastClickElapsedMs = 0L
 
-    // The paste box is mirrored into durable storage, but only once typing/pasting has paused
-    // for half a second (and always when the screen leaves the foreground) - saving the whole
-    // text on every single keystroke made pasting/typing a long list laggy.
     private val draftHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val draftSaveRunnable = Runnable { saveDraftNow() }
 
@@ -48,8 +47,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         numberDraftStore.setDraft(binding.etNumbers.text.toString())
     }
 
-    // Optional cap on how many calls to dial in one batch. Set via Settings > Batch Limit.
-    // 0 = unlimited (dial the whole list).
     private var batchTargetPref = 0
 
     private val requiredPermissions = arrayOf(
@@ -61,8 +58,7 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
     private val filePickerLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode == RESULT_OK) {
-                val uri: Uri? = result.data?.data
-                if (uri != null) importNumbersFromFile(uri)
+                result.data?.data?.let { importNumbersFromFile(it) }
             }
         }
 
@@ -83,8 +79,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
             }
         }
 
-    /** Handles results reported back from the new SettingsActivity for the few items whose
-     * dialogs need this Activity's own in-memory stores (see SettingsActivity's class doc). */
     private val settingsLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode == RESULT_OK) {
@@ -118,10 +112,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         subscriptionManager.ensureFirstLaunchRecorded()
         subscriptionManager.refreshStatusInBackground()
 
-        // No free/paid time left (or never picked a plan at all) - send straight to the
-        // plan-selection screen instead of showing the dialer. This is the single gate that
-        // covers every path into this screen: right after login, and any time a running
-        // trial/plan runs out while the app is closed or reopened later.
         if (!subscriptionManager.hasAccess()) {
             startActivity(Intent(this, SubscriptionActivity::class.java))
             finish()
@@ -131,7 +121,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         engine = CallEngine(this, sessionStore, callLogStore, this, AndroidKeepAlive.get(this))
         requestNotificationPermissionOnce()
         Thread {
-            // One-time: encrypt call-log files written by older versions; remove leftover shared CSVs.
             FileStore.encryptLegacyFiles(applicationContext)
             FileStore.purgeStaleExports(applicationContext)
         }.also { it.isDaemon = true }.start()
@@ -142,61 +131,61 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
 
         requestNeededPermissions()
 
-        binding.btnPasteClipboard.setOnClickListener { pasteFromClipboard() }
-        binding.btnImportFile.setOnClickListener { openFilePicker() }
-        binding.btnImportImage.setOnClickListener { openImagePicker() }
-        binding.btnLoadListTop.setOnClickListener { loadNumbersFromInput() }
-        binding.btnStart.setOnClickListener { onStartClicked() }
-        binding.btnStop.setOnClickListener { engine.stop() }
-        binding.btnFloatingStop.setOnClickListener { engine.stop() }
-        binding.btnSettings.setOnClickListener { settingsLauncher.launch(Intent(this, SettingsActivity::class.java)) }
-        binding.btnRemoveList.setOnClickListener { confirmRemoveList() }
+        binding.btnPasteClipboard.setOnClickListener { if (allowClick()) pasteFromClipboard() }
+        binding.btnImportFile.setOnClickListener { if (allowClick()) openFilePicker() }
+        binding.btnImportImage.setOnClickListener { if (allowClick()) openImagePicker() }
+        binding.btnLoadListTop.setOnClickListener { if (allowClick()) loadNumbersFromInput() }
+        binding.btnStart.setOnClickListener { if (allowClick()) onStartClicked() }
+        binding.btnStop.setOnClickListener { if (allowClick()) engine.stop() }
+        binding.btnFloatingStop.setOnClickListener { if (allowClick()) engine.stop() }
+        binding.btnSettings.setOnClickListener {
+            if (allowClick()) settingsLauncher.launch(Intent(this, SettingsActivity::class.java))
+        }
+        binding.btnRemoveList.setOnClickListener { if (allowClick()) confirmRemoveList() }
 
         setLoadButtonActive(false)
         binding.etNumbers.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: android.text.Editable?) {
-                // List changed since the last Load - go back to light until user taps Load again.
                 setLoadButtonActive(false)
-                // Always mirror the box into durable storage - this is what survives the app
-                // being killed while an image/file picker is open, and what late-arriving OCR
-                // results are checked against so nothing silently disappears.
                 draftHandler.removeCallbacks(draftSaveRunnable)
                 draftHandler.postDelayed(draftSaveRunnable, 500)
             }
         })
 
-        // Restore whatever was in the box before (paste/OCR results not yet loaded into a
-        // list) in case this Activity was recreated - e.g. process killed while picking images.
         val draft = numberDraftStore.getDraft()
         if (draft.isNotBlank() && binding.etNumbers.text.isBlank()) {
             binding.etNumbers.setText(draft)
         }
 
-        // Outcome overlay buttons are built dynamically (see renderOutcomeOverlay) so any
-        // number of default + custom options fit and adjust automatically.
         renderOutcomeOverlay()
 
-        if (sessionStore.hasSavedSession()) {
-            if (engine.restoreIfAvailable()) {
-                adapter.setLeads(engine.leads)
-                refreshDashboard()
-                Toast.makeText(this, "Previous session restored (${engine.restoreSummary ?: "in progress"}) - tap 'Start' to continue. Nobody is called again.", Toast.LENGTH_LONG).show()
-                // If a call had ended but its outcome was never tagged (Stop pressed, app
-                // closed, crash, etc.), ask for it right away - don't wait for Start.
-                // Exception: if the app was specifically waiting for a WhatsApp return when it
-                // got killed, don't show the overlay again - just pick up exactly where it left
-                // off (see onResume) instead of making the user redo the WhatsApp step.
-                if (engine.isAwaitingWhatsAppReturn()) {
-                    pendingInfoOutcome = true
-                } else if (engine.pendingLead() != null) {
-                    hideKeyboard()
-                    binding.overlayOutcome.visibility = android.view.View.VISIBLE
-                }
+        if (sessionStore.hasSavedSession() && engine.restoreIfAvailable()) {
+            adapter.setLeads(engine.leads)
+            refreshDashboard()
+            val statusText = engine.restoreSummary ?: "in progress"
+            showToast("Session restored ($statusText). Tap Start to resume.", Toast.LENGTH_LONG)
+            if (engine.isAwaitingWhatsAppReturn()) {
+                pendingInfoOutcome = true
+            } else if (engine.pendingLead() != null) {
+                hideKeyboard()
+                binding.overlayOutcome.visibility = View.VISIBLE
             }
         }
+    }
 
+    private fun allowClick(debounceMs: Long = 450L): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastClickElapsedMs < debounceMs) return false
+        lastClickElapsedMs = now
+        return true
+    }
+
+    private fun showToast(message: String, duration: Int = Toast.LENGTH_SHORT) {
+        if (!isFinishing && !isDestroyed) {
+            Toast.makeText(this, message, duration).show()
+        }
     }
 
     private fun requestNeededPermissions() {
@@ -208,14 +197,34 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         }
     }
 
+    private fun showPermissionSettingsDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Permissions required")
+            .setMessage("Phone and Call State permissions are required to place and track calls automatically. Enable them in App Settings.")
+            .setPositiveButton("Open Settings") { _, _ ->
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun pasteFromClipboard() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = clipboard.primaryClip
-        if (clip != null && clip.itemCount > 0) {
-            val text = clip.getItemAt(0).coerceToText(this).toString()
-            binding.etNumbers.setText(text)
+        val text = if (clip != null && clip.itemCount > 0) {
+            clip.getItemAt(0).coerceToText(this)?.toString().orEmpty()
         } else {
-            Toast.makeText(this, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+            ""
+        }
+        if (text.isBlank()) {
+            showToast("Clipboard is empty.")
+        } else {
+            val existing = binding.etNumbers.text.toString()
+            binding.etNumbers.setText(if (existing.isBlank()) text else "$existing\n$text")
+            showToast("Numbers pasted from clipboard.")
         }
     }
 
@@ -229,7 +238,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
     }
 
     private fun importNumbersFromFile(uri: Uri) {
-        // Reading a big file on the main thread froze the screen - read it in the background.
         Thread {
             try {
                 val content = contentResolver.openInputStream(uri)?.use { stream ->
@@ -237,9 +245,7 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
                 }
                 runOnUiThread {
                     if (content == null) {
-                        if (!isFinishing && !isDestroyed) {
-                            Toast.makeText(this, "Could not read file", Toast.LENGTH_LONG).show()
-                        }
+                        showToast("Unable to read the selected file.", Toast.LENGTH_LONG)
                         return@runOnUiThread
                     }
                     if (isFinishing || isDestroyed) {
@@ -249,21 +255,16 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
                     val existing = binding.etNumbers.text.toString()
                     val merged = if (existing.isBlank()) content else "$existing\n$content"
                     binding.etNumbers.setText(merged)
-                    Toast.makeText(this, "File imported, now tap the ⬇ icon to load", Toast.LENGTH_SHORT).show()
+                    showToast("File imported. Tap Load to prepare the call list.")
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    if (!isFinishing && !isDestroyed) {
-                        Toast.makeText(this, "Could not read file: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
+                    showToast("Failed to import file. Please try another CSV or TXT file.", Toast.LENGTH_LONG)
                 }
             }
         }.start()
     }
 
-    /** Used when a background import/OCR finishes after this screen was already closed or
-     * recreated: the result goes straight into the saved draft so it is never lost - it shows up
-     * in the paste box the next time the screen is shown. */
     private fun appendToDraftStore(newText: String) {
         val store = NumberDraftStore(applicationContext)
         val existing = store.getDraft()
@@ -275,34 +276,21 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
             type = "image/*"
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         }
-        imagePickerLauncher.launch(Intent.createChooser(intent, "Select image(s) with numbers"))
+        imagePickerLauncher.launch(Intent.createChooser(intent, "Select images containing numbers"))
     }
 
-    /**
-     * Runs on-device OCR (ML Kit, free, works offline) on each selected image, extracts
-     * phone-number-like sequences exactly as they appear, and merges the de-duplicated
-     * set into the paste box. Numbers are kept exactly as recognized - nothing is invented.
-     *
-     * Decoding runs off the main thread and downsamples large images first - full-resolution
-     * screenshots decoded on the UI thread is what was causing the repeated freezing/lag when
-     * a few images were picked at once.
-     */
     private fun extractNumbersFromImages(uris: List<Uri>) {
-        Toast.makeText(this, "Processing ${uris.size} image(s)...", Toast.LENGTH_SHORT).show()
+        showToast("Scanning ${uris.size} image(s)...")
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         val allNumbers = linkedSetOf<String>()
         val failedCount = java.util.concurrent.atomic.AtomicInteger(0)
         val remaining = java.util.concurrent.atomic.AtomicInteger(uris.size)
 
-        // Called exactly once per image (atomic counter - the old plain counter could be hit
-        // from two threads at the same moment). The last one releases the OCR engine and
-        // reports the combined result.
         fun oneDone() {
             if (remaining.decrementAndGet() == 0) {
                 try {
                     recognizer.close()
-                } catch (e: Exception) {
-                    // Ignore
+                } catch (_: Exception) {
                 }
                 val snapshot = synchronized(allNumbers) { LinkedHashSet(allNumbers) }
                 onImagesProcessed(snapshot, failedCount.get())
@@ -322,7 +310,7 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
                     recognizer.process(image)
                         .addOnSuccessListener { visionText ->
                             synchronized(allNumbers) {
-                                allNumbers.addAll(extractPhoneNumbers(visionText.text))
+                                allNumbers.addAll(NumberParser.extractPhoneNumbers(visionText.text))
                             }
                             oneDone()
                         }
@@ -330,7 +318,7 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
                             failedCount.incrementAndGet()
                             oneDone()
                         }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     failedCount.incrementAndGet()
                     oneDone()
                 }
@@ -338,9 +326,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         }.start()
     }
 
-    /** Decodes a URI to a Bitmap capped at maxDimension on its longest side, entirely off the
-     * main thread - avoids decoding several full-resolution screenshots synchronously, which is
-     * what causes the app to freeze/lag when picking multiple images. */
     private fun decodeSampledBitmap(uri: Uri, maxDimension: Int): android.graphics.Bitmap? {
         return try {
             val boundsOptions = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -358,201 +343,219 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
             contentResolver.openInputStream(uri)?.use {
                 android.graphics.BitmapFactory.decodeStream(it, null, decodeOptions)
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
-
-    // Parsing lives in NumberParser (regular expressions are built once, not per line).
-    private fun extractPhoneNumbers(text: String): Set<String> = NumberParser.extractPhoneNumbers(text)
 
     private fun onImagesProcessed(numbers: Set<String>, failedCount: Int) {
         runOnUiThread {
             val screenGone = isFinishing || isDestroyed
             if (numbers.isEmpty()) {
                 if (screenGone) return@runOnUiThread
-                val msg = if (failedCount > 0)
-                    "Couldn't read $failedCount image(s) - try a plain screenshot instead of a cropped/rotated photo"
-                else "No numbers found in the image(s)"
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                val msg = if (failedCount > 0) {
+                    "Could not read $failedCount image(s). Please use clear, uncropped screenshots."
+                } else {
+                    "No valid phone numbers found in the selected image(s)."
+                }
+                showToast(msg, Toast.LENGTH_LONG)
                 return@runOnUiThread
             }
             val newText = numbers.joinToString("\n")
             if (screenGone) {
-                // The screen was closed/recreated while OCR was running - keep the result in
-                // the saved draft instead of dropping it.
                 appendToDraftStore(newText)
                 return@runOnUiThread
             }
             val existing = binding.etNumbers.text.toString()
             val merged = if (existing.isBlank()) newText else "$existing\n$newText"
             binding.etNumbers.setText(merged)
-            val summary = StringBuilder("${numbers.size} number(s) found (duplicates auto-removed)")
-            if (failedCount > 0) summary.append(", $failedCount image(s) could not be read")
-            summary.append(", now tap the ⬇ icon to load")
-            Toast.makeText(this, summary.toString(), Toast.LENGTH_LONG).show()
+            val summary = buildString {
+                append("${numbers.size} valid number(s) extracted.")
+                if (failedCount > 0) append(" $failedCount image(s) skipped.")
+                append(" Tap Load to prepare the list.")
+            }
+            showToast(summary, Toast.LENGTH_LONG)
         }
     }
 
     private fun setLoadButtonActive(active: Boolean) {
         val drawableRes = if (active) R.drawable.bg_pill_load_active else R.drawable.bg_pill_load_idle
-        binding.btnLoadListTop.background = androidx.core.content.ContextCompat.getDrawable(this, drawableRes)
+        binding.btnLoadListTop.background = ContextCompat.getDrawable(this, drawableRes)
     }
 
     private fun showBatchLimitDialog() {
-        val editText = android.widget.EditText(this)
-        editText.inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        editText.setText(if (batchTargetPref > 0) batchTargetPref.toString() else "")
-        editText.hint = "0 = no limit (call the whole list)"
-        editText.setPadding(48, 32, 48, 32)
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Batch limit")
+        val editText = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(if (batchTargetPref > 0) batchTargetPref.toString() else "")
+            hint = "0 = unlimited (dial entire list)"
+            setPadding(48, 32, 48, 32)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Batch call limit")
             .setView(editText)
             .setPositiveButton("Save") { _, _ ->
                 batchTargetPref = editText.text.toString().trim().toIntOrNull() ?: 0
-                Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
+                showToast("Batch limit updated.")
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun extractLeadsFromLine(line: String, startIndex: Int): List<Lead> =
-        NumberParser.extractLeadsFromLine(line, startIndex)
-
     private fun loadNumbersFromInput() {
+        if (isLoadingList) return
         if (engine.hasActiveList()) {
-            Toast.makeText(
-                this,
-                "Aaj ki list abhi khatam nahi hui hai. Pehle usse poora karo ya ✕ se hatao.",
-                Toast.LENGTH_LONG
-            ).show()
+            showToast("An active list is already loaded. Complete or remove it before loading a new one.", Toast.LENGTH_LONG)
             return
         }
         val raw = binding.etNumbers.text.toString()
-        val rawLines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
-
-        val parsedLeads = mutableListOf<Lead>()
-        val unparsableLines = mutableListOf<String>()
-        var runningIndex = 1
-        for (line in rawLines) {
-            val leadsFromLine = extractLeadsFromLine(line, runningIndex)
-            if (leadsFromLine.isEmpty()) {
-                unparsableLines.add(line)
-            } else {
-                parsedLeads.addAll(leadsFromLine)
-                runningIndex += leadsFromLine.size
-            }
-        }
-
-        if (parsedLeads.isEmpty()) {
-            Toast.makeText(this, "No valid numbers found", Toast.LENGTH_SHORT).show()
+        if (raw.isBlank()) {
+            showToast("Paste or import phone numbers first.")
             return
         }
 
-        val seen = mutableSetOf<String>()
-        val duplicates = mutableListOf<String>()
-        val deduped = mutableListOf<Lead>()
-        for (lead in parsedLeads) {
-            val normalized = PhoneUtils.normalize(lead.phone)
-            if (seen.contains(normalized)) {
-                duplicates.add(lead.phone)
-            } else {
-                seen.add(normalized)
-                deduped.add(lead)
+        isLoadingList = true
+        binding.btnLoadListTop.isEnabled = false
+
+        Thread {
+            try {
+                val rawLines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                val parsedLeads = mutableListOf<Lead>()
+                var invalidLineCount = 0
+                var runningIndex = 1
+
+                for (line in rawLines) {
+                    val leadsFromLine = NumberParser.extractLeadsFromLine(line, runningIndex)
+                    if (leadsFromLine.isEmpty()) {
+                        invalidLineCount++
+                    } else {
+                        parsedLeads.addAll(leadsFromLine)
+                        runningIndex += leadsFromLine.size
+                    }
+                }
+
+                val seen = mutableSetOf<String>()
+                var duplicateCount = 0
+                val deduped = mutableListOf<Lead>()
+                for (lead in parsedLeads) {
+                    val normalized = PhoneUtils.normalize(lead.phone)
+                    if (seen.add(normalized)) {
+                        deduped.add(lead)
+                    } else {
+                        duplicateCount++
+                    }
+                }
+
+                val alreadyCalledPhones = callLogStore.allCalledPhones()
+                val neverCalled = deduped.filter { !alreadyCalledPhones.contains(PhoneUtils.normalize(it.phone)) }
+                val alreadyCalledCount = deduped.size - neverCalled.size
+
+                val warnings = mutableListOf<String>()
+                if (duplicateCount > 0) warnings.add("$duplicateCount duplicate number(s) removed.")
+                if (invalidLineCount > 0) warnings.add("$invalidLineCount invalid or incomplete entry(s) skipped.")
+                if (alreadyCalledCount > 0) warnings.add("$alreadyCalledCount previously called number(s) excluded.")
+
+                runOnUiThread {
+                    isLoadingList = false
+                    binding.btnLoadListTop.isEnabled = true
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+
+                    if (parsedLeads.isEmpty()) {
+                        binding.tvDuplicateInfo.text = if (invalidLineCount > 0) {
+                            "$invalidLineCount invalid entry(s) skipped. Enter valid 10-digit numbers."
+                        } else ""
+                        showToast("No valid phone numbers found.")
+                        return@runOnUiThread
+                    }
+
+                    binding.tvDuplicateInfo.text = warnings.joinToString("\n")
+
+                    if (neverCalled.isEmpty()) {
+                        showToast("All valid numbers in this input have already been called.", Toast.LENGTH_LONG)
+                        return@runOnUiThread
+                    }
+
+                    AlertDialog.Builder(this)
+                        .setTitle("Confirm contact list")
+                        .setMessage("Load ${neverCalled.size} verified contact(s) into the dialer queue?")
+                        .setPositiveButton("Load List") { _, _ ->
+                            engine.loadLeads(neverCalled, "Session ${System.currentTimeMillis()}")
+                            adapter.setLeads(engine.leads)
+                            refreshDashboard()
+                            setLoadButtonActive(true)
+                            binding.etNumbers.setText("")
+                            showToast("${neverCalled.size} contact(s) loaded.")
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+            } catch (_: Exception) {
+                runOnUiThread {
+                    isLoadingList = false
+                    binding.btnLoadListTop.isEnabled = true
+                    showToast("Unable to process the number list. Please check the format.")
+                }
             }
-        }
-
-        val warnings = mutableListOf<String>()
-        if (duplicates.isNotEmpty()) warnings.add("${duplicates.size} duplicate number(s) found and removed.")
-        if (unparsableLines.isNotEmpty()) warnings.add("${unparsableLines.size} line(s) had no valid phone number and were skipped.")
-
-        // Permanent, all-time exclusion: once a number has ever been called through this app
-        // (on any day, in any past list), it can never be loaded into a list again - this is
-        // the hard guarantee that no number gets called twice, not just a recent-days window.
-        val alreadyCalledPhones = callLogStore.allCalledPhones()
-        val neverCalled = deduped.filter { !alreadyCalledPhones.contains(PhoneUtils.normalize(it.phone)) }
-        val alreadyCalledCount = deduped.size - neverCalled.size
-        if (alreadyCalledCount > 0) {
-            warnings.add("$alreadyCalledCount number(s) already called before (ever) have been excluded.")
-        }
-        binding.tvDuplicateInfo.text = warnings.joinToString("\n")
-
-        if (neverCalled.isEmpty()) {
-            Toast.makeText(this, "All these numbers have already been called before", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        // Consent confirmation happens once right here at load time, instead of a checkbox
-        // sitting on the main screen at all times.
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Confirm before loading")
-            .setMessage("Are these ${neverCalled.size} numbers all consenting/authorized contacts?")
-            .setPositiveButton("Yes, load list") { _, _ ->
-                engine.loadLeads(neverCalled, "Session ${System.currentTimeMillis()}")
-                adapter.setLeads(engine.leads)
-                refreshDashboard()
-                setLoadButtonActive(true)
-                binding.etNumbers.setText("") // these numbers are now a committed list, not a draft
-                Toast.makeText(this, "${neverCalled.size} numbers loaded", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+        }.start()
     }
 
     private fun onStartClicked() {
         hideKeyboard()
         if (!subscriptionManager.hasAccess()) {
-            Toast.makeText(this, "Trial/subscription expired - activate a plan in Settings > Plan", Toast.LENGTH_LONG).show()
+            showToast("Your plan has expired. Please activate a plan to continue.", Toast.LENGTH_LONG)
             startActivity(Intent(this, SubscriptionActivity::class.java))
             return
         }
         if (engine.leads.isEmpty()) {
-            Toast.makeText(this, "Load a list first", Toast.LENGTH_SHORT).show()
+            showToast("Load a contact list first.")
             return
         }
-        val missing = requiredPermissions.any {
+        val missingPermissions = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing) {
-            requestNeededPermissions()
-            Toast.makeText(this, "Call permission is required", Toast.LENGTH_SHORT).show()
+        if (missingPermissions.isNotEmpty()) {
+            val permanentlyDenied = missingPermissions.any {
+                !ActivityCompat.shouldShowRequestPermissionRationale(this, it)
+            } && getSharedPreferences("perm_prefs", Context.MODE_PRIVATE).getBoolean("asked_once", false)
+
+            if (permanentlyDenied) {
+                showPermissionSettingsDialog()
+            } else {
+                getSharedPreferences("perm_prefs", Context.MODE_PRIVATE).edit().putBoolean("asked_once", true).apply()
+                requestNeededPermissions()
+                showToast("Phone and Call State permissions are required.")
+            }
             return
         }
         engine.batchTarget = batchTargetPref
-        // At the moment it matters: explain + offer the battery exemption (never blocks - "Not now" still starts).
         BatteryExemptionFlow.gateThen(this) { engine.start() }
     }
 
     private fun confirmRemoveList() {
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Remove current list?")
-            .setMessage("Numbers already called stay recorded in the sheet. Remaining un-called numbers in this list will be discarded.")
-            .setPositiveButton("Remove") { _, _ ->
+        AlertDialog.Builder(this)
+            .setTitle("Clear active list?")
+            .setMessage("Completed calls remain saved in Call Sheets. Remaining pending numbers will be cleared.")
+            .setPositiveButton("Clear List") { _, _ ->
                 engine.removeCurrentList()
                 clearListUi()
-                Toast.makeText(this, "List removed", Toast.LENGTH_SHORT).show()
+                showToast("Active list cleared.")
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    /** Resets the number-entry UI so a fresh list can be pasted/loaded. */
     private fun clearListUi() {
         binding.etNumbers.setText("")
         binding.tvDuplicateInfo.text = ""
         adapter.setLeads(engine.leads)
-        binding.overlayOutcome.visibility = android.view.View.GONE
-        binding.btnFloatingStop.visibility = android.view.View.GONE
+        binding.overlayOutcome.visibility = View.GONE
+        binding.btnFloatingStop.visibility = View.GONE
         setLoadButtonActive(false)
         refreshDashboard()
     }
 
     private fun selectOutcomeAndHide(outcomeId: String) {
-        binding.overlayOutcome.visibility = android.view.View.GONE
+        binding.overlayOutcome.visibility = View.GONE
         if (outcomeId == Outcome.INFO.id) {
-            // Don't dial the next number yet - open WhatsApp first and wait for the user to
-            // actually tap Send and come back to the app (see onResume). Dialing immediately
-            // here would fire the next call while WhatsApp is still on screen.
             val lead = engine.pendingLead()
             if (lead != null) {
                 pendingInfoOutcome = true
@@ -566,60 +569,45 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         }
     }
 
-    /** Opens WhatsApp Business directly on this number's chat with the info message pre-filled
-     *  (editable, just needs Send). Falls back to regular WhatsApp only if Business isn't installed. */
     private fun openWhatsAppWithMessage(phone: String) {
-        val digits = phone.filter { it.isDigit() }
-        val withCountryCode = when {
-            digits.length == 10 -> "91$digits"
-            digits.length == 11 && digits.startsWith("0") -> "91${digits.substring(1)}"
-            else -> digits
-        }
+        val withCountryCode = PhoneUtils.toWhatsAppDigits(phone)
         val message = infoMessageStore.getMessage()
         val encodedMessage = java.net.URLEncoder.encode(message, "UTF-8")
         val uri = Uri.parse("https://wa.me/$withCountryCode?text=$encodedMessage")
 
-        val packagesInPriorityOrder = listOf("com.whatsapp.w4b", "com.whatsapp")
-        for (pkg in packagesInPriorityOrder) {
+        for (pkg in listOf("com.whatsapp.w4b", "com.whatsapp")) {
             try {
-                val intent = Intent(Intent.ACTION_VIEW, uri)
-                intent.setPackage(pkg)
+                val intent = Intent(Intent.ACTION_VIEW, uri).apply { setPackage(pkg) }
                 startActivity(intent)
                 return
-            } catch (e: android.content.ActivityNotFoundException) {
-                // try next package
+            } catch (_: android.content.ActivityNotFoundException) {
             }
         }
-        // Neither WhatsApp Business nor regular WhatsApp found under those package names -
-        // let Android pick whatever handles wa.me links (last resort).
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
-        } catch (e2: android.content.ActivityNotFoundException) {
-            Toast.makeText(this, "WhatsApp Business not found - install it to use this feature", Toast.LENGTH_SHORT).show()
+        } catch (_: android.content.ActivityNotFoundException) {
+            pendingInfoOutcome = false
+            engine.selectOutcome(Outcome.INFO.id)
+            showToast("WhatsApp is not installed on this device.")
         }
     }
 
-    /** Editable from Settings > Edit Info Message. */
     private fun showEditInfoMessageDialog() {
-        val editText = android.widget.EditText(this)
-        editText.setText(infoMessageStore.getMessage())
-        editText.setPadding(48, 32, 48, 32)
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Info message (WhatsApp)")
+        val editText = android.widget.EditText(this).apply {
+            setText(infoMessageStore.getMessage())
+            setPadding(48, 32, 48, 32)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("WhatsApp follow-up message")
             .setView(editText)
             .setPositiveButton("Save") { _, _ ->
                 infoMessageStore.setMessage(editText.text.toString())
-                Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
+                showToast("Message saved.")
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    /**
-     * Builds the outcome overlay buttons at runtime (2 per row) from whatever outcomes
-     * currently exist (4 defaults + any custom ones the user added). This is what lets
-     * the layout adjust automatically instead of being stuck at a fixed 4 boxes.
-     */
     private fun renderOutcomeOverlay() {
         val container = binding.outcomeButtonsContainer
         container.removeAllViews()
@@ -639,9 +627,10 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
                     textSize = 18f
                     setTypeface(typeface, android.graphics.Typeface.BOLD)
                     gravity = android.view.Gravity.CENTER
-                    val bg = android.graphics.drawable.GradientDrawable()
-                    bg.cornerRadius = dp(18).toFloat()
-                    bg.setColor(outcome.color())
+                    val bg = android.graphics.drawable.GradientDrawable().apply {
+                        cornerRadius = dp(18).toFloat()
+                        setColor(outcome.color())
+                    }
                     background = bg
                     elevation = dp(16).toFloat()
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
@@ -653,7 +642,7 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
                     ).apply {
                         if (i == 0) marginEnd = dp(6) else marginStart = dp(6)
                     }
-                    setOnClickListener { selectOutcomeAndHide(outcome.id) }
+                    setOnClickListener { if (allowClick(250L)) selectOutcomeAndHide(outcome.id) }
                     if (outcome.id == Outcome.INFO.id) {
                         setOnLongClickListener { showEditInfoMessageDialog(); true }
                     }
@@ -673,7 +662,7 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         val existingContainer = dialogView.findViewById<android.widget.LinearLayout>(R.id.existingOutcomesContainer)
         val btnClose = dialogView.findViewById<android.widget.TextView>(R.id.btnCloseManageOutcomes)
 
-        val dialog = android.app.AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setView(dialogView)
             .create()
 
@@ -688,9 +677,10 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
                 val badge = android.widget.TextView(this).apply {
                     text = outcome.label
                     setTextColor(outcome.textColor())
-                    val bg = android.graphics.drawable.GradientDrawable()
-                    bg.cornerRadius = dp(20).toFloat()
-                    bg.setColor(outcome.color())
+                    val bg = android.graphics.drawable.GradientDrawable().apply {
+                        cornerRadius = dp(20).toFloat()
+                        setColor(outcome.color())
+                    }
                     background = bg
                     setPadding(dp(12), dp(6), dp(12), dp(6))
                     layoutParams = android.widget.LinearLayout.LayoutParams(
@@ -722,9 +712,9 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
                 etLabel.setText("")
                 refreshList()
                 renderOutcomeOverlay()
-                Toast.makeText(this, "'${added.label}' added", Toast.LENGTH_SHORT).show()
+                showToast("'${added.label}' added.")
             } else {
-                Toast.makeText(this, "Enter a label", Toast.LENGTH_SHORT).show()
+                showToast("Enter an outcome label.")
             }
         }
         btnClose.setOnClickListener { dialog.dismiss() }
@@ -732,10 +722,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         dialog.show()
     }
 
-    /**
-     * Drives all the visible state that depends on whether a list is loaded: the paste area
-     * vs. the list-summary+numbers view, the bottom Start/Stop dock, and the count text.
-     */
     private fun refreshDashboard() {
         val leads = engine.leads
         val total = leads.size
@@ -743,13 +729,13 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         val skipped = leads.count { it.status == CallSequencer.Status.SKIPPED }
 
         val hasList = engine.hasActiveList()
-        binding.llListSummary.visibility = if (hasList) android.view.View.VISIBLE else android.view.View.GONE
-        binding.llPasteArea.visibility = if (hasList) android.view.View.GONE else android.view.View.VISIBLE
-        binding.tvNumbersLabel.visibility = if (hasList) android.view.View.VISIBLE else android.view.View.GONE
-        binding.dockControls.visibility = if (hasList) android.view.View.VISIBLE else android.view.View.GONE
+        binding.llListSummary.visibility = if (hasList) View.VISIBLE else View.GONE
+        binding.llPasteArea.visibility = if (hasList) View.GONE else View.VISIBLE
+        binding.tvNumbersLabel.visibility = if (hasList) View.VISIBLE else View.GONE
+        binding.dockControls.visibility = if (hasList) View.VISIBLE else View.GONE
 
         if (hasList) {
-            binding.tvListSummaryCount.text = "$total numbers • ${completed + skipped} called"
+            binding.tvListSummaryCount.text = "$total contacts • ${completed + skipped} dialed"
         }
     }
 
@@ -765,15 +751,15 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
     override fun onDialing(index: Int, lead: Lead) {
         runOnUiThread {
             val label = if (lead.name.isNullOrBlank()) lead.phone else "${lead.name} (${lead.phone})"
-            binding.tvListSummaryCount.text = "Calling: $label  (${index + 1}/${engine.leads.size})"
-            binding.btnFloatingStop.visibility = android.view.View.VISIBLE
+            binding.tvListSummaryCount.text = "Dialing: $label (${index + 1}/${engine.leads.size})"
+            binding.btnFloatingStop.visibility = View.VISIBLE
         }
     }
 
     override fun onCallEndedAwaitingOutcome(index: Int) {
         runOnUiThread {
             hideKeyboard()
-            binding.overlayOutcome.visibility = android.view.View.VISIBLE
+            binding.overlayOutcome.visibility = View.VISIBLE
         }
     }
 
@@ -787,8 +773,8 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
 
     override fun onBatchComplete(callsDone: Int) {
         runOnUiThread {
-            binding.btnFloatingStop.visibility = android.view.View.GONE
-            Toast.makeText(this, "Target of $callsDone calls reached. Tap Start to continue.", Toast.LENGTH_LONG).show()
+            binding.btnFloatingStop.visibility = View.GONE
+            showToast("Batch limit of $callsDone calls reached. Tap Start to continue.", Toast.LENGTH_LONG)
             refreshDashboard()
         }
     }
@@ -799,33 +785,34 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
 
     override fun onSessionResumed() {
         runOnUiThread {
-            binding.btnFloatingStop.visibility = android.view.View.VISIBLE
+            binding.btnFloatingStop.visibility = View.VISIBLE
         }
     }
 
     override fun onSessionStopped() {
         runOnUiThread {
-            binding.overlayOutcome.visibility = android.view.View.GONE
-            binding.btnFloatingStop.visibility = android.view.View.GONE
+            binding.overlayOutcome.visibility = View.GONE
+            binding.btnFloatingStop.visibility = View.GONE
             refreshDashboard()
         }
     }
 
     override fun onSessionComplete() {
         runOnUiThread {
-            Toast.makeText(this, "List complete - all numbers moved to sheet", Toast.LENGTH_LONG).show()
+            showToast("All calls completed and saved to Call Sheets.", Toast.LENGTH_LONG)
             clearListUi()
         }
     }
 
     override fun onEngineError(message: String) {
         runOnUiThread {
-            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            val cleanMsg = message.ifBlank { "Unable to place call. Please check network signal and SIM settings." }
+            showToast(cleanMsg, Toast.LENGTH_LONG)
         }
     }
 
     override fun onLog(message: String) {
-        // Minimal for this scope.
+        // Handled internally via SafeLog
     }
 
     override fun onRequestPermissionsResult(
@@ -836,13 +823,10 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == permissionRequestCode) {
             val allGranted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-            if (allGranted) requestNotificationPermissionOnce()
-            if (!allGranted) {
-                Toast.makeText(
-                    this,
-                    "Call and Phone State permission are required for the app to work",
-                    Toast.LENGTH_LONG
-                ).show()
+            if (allGranted) {
+                requestNotificationPermissionOnce()
+            } else {
+                showToast("Phone and Call State permissions are required to place calls.", Toast.LENGTH_LONG)
             }
         }
     }
@@ -850,9 +834,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
     override fun onResume() {
         super.onResume()
         subscriptionManager.refreshStatusInBackground()
-        // Catches the case where OCR/file-import finished AFTER this Activity got recreated
-        // (e.g. app was killed in the background while picking images) - the result was saved
-        // straight to the draft store, so pull it in now instead of it looking "missing".
         val draft = numberDraftStore.getDraft()
         if (draft != binding.etNumbers.text.toString()) {
             binding.etNumbers.setText(draft)
@@ -863,7 +844,7 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         }
         authManager.checkSessionInBackground {
             runOnUiThread {
-                Toast.makeText(this, "Logged out - this account was used on another device", Toast.LENGTH_LONG).show()
+                showToast("Session signed out because this account was accessed on another device.", Toast.LENGTH_LONG)
                 authManager.logout()
                 if (::engine.isInitialized) engine.stop()
                 startActivity(Intent(this, LoginActivity::class.java))
@@ -872,28 +853,21 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         }
     }
 
-    /** The "dialer is running" notification needs this on Android 13+. Denying it never blocks dialing -
-     * the foreground service still protects the session, the notification is just hidden. */
     private fun requestNotificationPermissionOnce() {
-        // Never overlap with the Call / Phone-state request: a second request while one dialog is open cancels it.
         val requiredGranted = requiredPermissions.all {
-            androidx.core.content.ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
         if (requiredGranted && android.os.Build.VERSION.SDK_INT >= 33 &&
-            androidx.core.content.ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
         ) {
-            androidx.core.app.ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 102)
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 102)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         draftHandler.removeCallbacks(draftSaveRunnable)
-        // Guarded: if this Activity is being torn down before `engine` was ever set up (e.g.
-        // it redirected straight to SubscriptionActivity because there's no active plan yet -
-        // right after login, before engine = CallEngine(...) runs), engine.teardown() would
-        // throw and crash the app every single time. This is exactly that safety check.
         if (::engine.isInitialized) engine.teardown()
     }
 
@@ -901,9 +875,6 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
         super.onPause()
         draftHandler.removeCallbacks(draftSaveRunnable)
         saveDraftNow()
-        // Final safety net: force a save the instant the app leaves the foreground (which
-        // happens on every single call, since dialing switches to the Phone app) - so even in
-        // the worst case, timing-wise, nothing is ever left un-saved.
         if (::engine.isInitialized) engine.persist()
     }
 }
