@@ -52,7 +52,7 @@ function routeRequest(e) {
     if (action === 'login' || action === 'resetPin') return jsonResponse({ status: 'error', message: 'Login now uses OTP - please update the app.' });
     if (action === 'checkSession') return handleCheckSession(e);
     if (action === 'startTrial') return handleStartTrial(e);
-    return jsonResponse({ status: 'error', message: 'Unknown action.' });
+    return jsonResponse({ status: 'error', message: 'unknown action' });
   } catch (err) {
     console.error('doGet failed: ' + (err && err.message ? err.message : err));
     return jsonResponse({ status: 'error', message: 'Server error: ' + String(err && err.message ? err.message : err).substring(0, 160) });
