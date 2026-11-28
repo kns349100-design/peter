@@ -1,22 +1,11 @@
 package com.autodialer.app
 
-import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
-import android.provider.Settings
-import android.widget.Toast
+import android.os.SystemClock
 import androidx.appcompat.app.AppCompatActivity
 import com.autodialer.app.databinding.ActivitySettingsBinding
 
-/**
- * Light, card-based settings screen (see activity_settings.xml) that replaced the old
- * PopupMenu. Simple navigation items (Sheets/Dashboard/Plan) are handled directly here.
- * Items that need MainActivity's own state (its dialogs read/write in-memory stores that
- * live on MainActivity) are reported back via setResult() + an action extra, and
- * MainActivity opens the actual dialog in onActivityResult - this avoids duplicating any
- * of that logic here or exposing MainActivity internals just for this screen.
- */
 class SettingsActivity : AppCompatActivity() {
 
     companion object {
@@ -27,6 +16,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private lateinit var binding: ActivitySettingsBinding
+    private var lastClickMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,7 +38,7 @@ class SettingsActivity : AppCompatActivity() {
         setupRow(binding.rowInfoMessage, "💬", "Edit Info Message", "Sent on WhatsApp for the Info outcome") {
             finishWithAction(ACTION_EDIT_INFO_MESSAGE)
         }
-        setupRow(binding.rowCustomOutcome, "➕", "Custom Call Option", "Add your own outcome buttons") {
+        setupRow(binding.rowCustomOutcome, "🏷️", "Custom Call Option", "Add your own outcome buttons") {
             finishWithAction(ACTION_CUSTOM_OUTCOME)
         }
         setupRow(binding.rowBatchLimit, "🔢", "Batch Limit", "Calls per session before pausing") {
@@ -62,9 +52,14 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Refresh the live plan status every time this screen is shown (not just on first
-        // create) - e.g. after coming back from actually buying/redeeming a plan.
         binding.rowPlan.rowSubtitle.text = SubscriptionManager(this).planSummaryForSettings()
+    }
+
+    private fun allowClick(debounceMs: Long = 400L): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastClickMs < debounceMs) return false
+        lastClickMs = now
+        return true
     }
 
     private fun setupRow(
@@ -77,7 +72,7 @@ class SettingsActivity : AppCompatActivity() {
         row.rowIcon.text = icon
         row.rowTitle.text = title
         row.rowSubtitle.text = subtitle
-        row.root.setOnClickListener { onClick() }
+        row.root.setOnClickListener { if (allowClick()) onClick() }
     }
 
     private fun finishWithAction(action: String) {
@@ -85,8 +80,6 @@ class SettingsActivity : AppCompatActivity() {
         finish()
     }
 
-    /** Self-contained (doesn't need any MainActivity state), so handled directly here rather
-     * than round-tripping through onActivityResult like the dialog-based items above. */
     private fun requestIgnoreBatteryOptimizations() {
         BatteryExemptionFlow.openFromSettings(this)
     }
