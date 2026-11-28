@@ -20,22 +20,11 @@
  *   (this tab is filled automatically by the script - don't edit rows,
  *    except to set Revoked = TRUE on a row to cut off one device/branch)
  *
- * Tab "Users" (row 1 = headers) - for phone number + PIN login
- *   Phone | PinHash | ActiveDeviceId | UpdatedAt | FailedAttempts | LockedUntil | TrialUsed | TrialStartedAt
+ * Tab "Users" (row 1 = headers) - for email + OTP login
+ *   Email | PinHash | ActiveDeviceId | UpdatedAt | FailedAttempts | LockedUntil | TrialUsed | TrialStartedAt
  *   (filled automatically by the script - don't edit rows manually. TrialUsed/TrialStartedAt
- *    track the one-time 24-hour free trial per phone number, so it can never be repeated by
+ *    track the one-time 24-hour free trial per account, so it can never be repeated by
  *    uninstalling and reinstalling the app.)
- *
- * ---- Reliability notes for anyone maintaining this file ----
- * - Every request that reads-then-writes a sheet takes a script lock first
- *   (see withLock()), so two requests arriving at the same instant can never
- *   both redeem the last use of a code, both log in with a wrong PIN guess
- *   without it counting, etc.
- * - doGet() never lets an exception escape as a raw Apps Script error page -
- *   it always returns clean JSON, because the app can only parse JSON.
- * - Every value that gets written into a Sheet cell is passed through
- *   safeCell() first, so a device ID or phone number that happens to start
- *   with "=", "+", "-" or "@" can never be misread by Sheets as a formula.
  */
 
 function doGet(e) {
@@ -63,16 +52,13 @@ function routeRequest(e) {
     if (action === 'login' || action === 'resetPin') return jsonResponse({ status: 'error', message: 'Login now uses OTP - please update the app.' });
     if (action === 'checkSession') return handleCheckSession(e);
     if (action === 'startTrial') return handleStartTrial(e);
-    return jsonResponse({ status: 'error', message: 'unknown action' });
+    return jsonResponse({ status: 'error', message: 'Unknown action.' });
   } catch (err) {
-    // Never let a raw exception escape - the app can only understand JSON.
-    console.error('doGet failed: ' + (err && err.message ? err.message : err)); // see Apps Script -> Executions
+    console.error('doGet failed: ' + (err && err.message ? err.message : err));
     return jsonResponse({ status: 'error', message: 'Server error: ' + String(err && err.message ? err.message : err).substring(0, 160) });
   }
 }
 
-/** Like getSheet, but creates the tab (with a header row) the first time it is needed, so new
- * features never fail just because a tab was not created by hand. */
 function getOrCreateSheet(name, headers) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(name);
@@ -89,13 +75,6 @@ function getSheet(name) {
   return sheet;
 }
 
-/**
- * Takes a script-wide lock for the duration of fn(), waiting up to 10s for
- * any other in-flight request to finish first. Wrap this around ANY
- * read-then-write sequence on a sheet (redeem a code, log in, grant a
- * payment) so two simultaneous requests can never race each other into an
- * inconsistent state (e.g. a 1-use code being redeemed twice at once).
- */
 function withLock(fn) {
   var lock = LockService.getScriptLock();
   var gotLock = lock.tryLock(10000);
@@ -109,18 +88,12 @@ function withLock(fn) {
   }
 }
 
-/** Prevents any value written into a Sheet cell from being misread as a
- * formula - if it starts with =, +, -, or @, prefix it with an apostrophe
- * (Sheets' own "treat as text" escape) so it is always stored literally. */
 function safeCell(value) {
   var s = String(value);
   if (/^[=+\-@]/.test(s)) return "'" + s;
   return s;
 }
 
-/** Caps + trims any free-text input coming from the app before it's used
- * anywhere, so an unexpectedly huge or malformed value can't cause slow
- * sheet operations or bad rows. */
 function cleanInput(value, maxLen) {
   var s = String(value == null ? '' : value).trim();
   if (s.length > maxLen) s = s.substring(0, maxLen);
@@ -129,11 +102,6 @@ function cleanInput(value, maxLen) {
 
 var PLAN_AMOUNTS = { HOURLY12: 10, MONTHLY: 300, YEARLY: 1000 };
 
-/**
- * Cashfree base API URL - sandbox for TEST keys, live for PROD keys. Controlled by the
- * CASHFREE_ENV script property ('TEST' or 'PROD', defaults to TEST so nothing breaks if
- * it's not set yet).
- */
 function cashfreeBaseUrl() {
   var env = PropertiesService.getScriptProperties().getProperty('CASHFREE_ENV');
   return (env === 'PROD') ? 'https://api.cashfree.com' : 'https://sandbox.cashfree.com';
@@ -149,8 +117,6 @@ function cashfreeHeaders() {
   };
 }
 
-// Cashfree orders are recorded server-side before the checkout URL is returned.
-// Never trust plan/device values supplied again by the app during payment verification.
 var CASHFREE_ORDERS_HEADERS = ['OrderId', 'DeviceId', 'PlanType', 'AmountRupees', 'CreatedAt', 'Status', 'Account'];
 function findCashfreeOrder(orderId) {
   var sheet = getOrCreateSheet('CashfreeOrders', CASHFREE_ORDERS_HEADERS);
@@ -163,14 +129,6 @@ function findCashfreeOrder(orderId) {
   return { sheet: sheet, row: -1, values: null };
 }
 
-/**
- * Creates a Cashfree Order and returns a URL (pointing back at this same Apps Script Web
- * App) that shows a tiny auto-redirecting page using Cashfree's official JS SDK - this is
- * Cashfree's "Standard Checkout", the one flow every account gets by default with zero extra
- * approval (unlike Payment Links and Custom/Headless Checkout, both of which returned "not
- * enabled or approved" errors on this account). Order creation itself was already confirmed
- * working earlier, so this routes entirely through calls that are proven to work.
- */
 function handleCreatePaymentLink(e) {
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   var planType = cleanInput(e.parameter.planType, 20).toUpperCase();
@@ -179,7 +137,7 @@ function handleCreatePaymentLink(e) {
   if (accountKey && !deviceOwnsAccount(accountKey, deviceId)) accountKey = '';
 
   if (!deviceId || !planType) {
-    return jsonResponse({ status: 'error', message: 'missing params' });
+    return jsonResponse({ status: 'error', message: 'Missing required parameters' });
   }
 
   var amountRupees = PLAN_AMOUNTS[planType];
@@ -189,14 +147,14 @@ function handleCreatePaymentLink(e) {
 
   var props = PropertiesService.getScriptProperties();
   if (!props.getProperty('CASHFREE_APP_ID') || !props.getProperty('CASHFREE_SECRET_KEY')) {
-    return jsonResponse({ status: 'error', message: 'Cashfree keys backend me set nahi hain' });
+    return jsonResponse({ status: 'error', message: 'Payment gateway keys are not configured on the server' });
   }
   var checkoutPageUrl = props.getProperty('GITHUB_PAGES_URL');
   if (!checkoutPageUrl) {
-    return jsonResponse({ status: 'error', message: 'GITHUB_PAGES_URL backend me set nahi hai - CASHFREE_SETUP.md dekho' });
+    return jsonResponse({ status: 'error', message: 'Checkout URL is not configured on the server' });
   }
 
-  if (!/^[0-9]{10}$/.test(phone)) phone = '9999999999'; // Cashfree requires a 10-digit phone
+  if (!/^[0-9]{10}$/.test(phone)) phone = '9999999999';
 
   var orderId = 'AD' + Date.now() + Utilities.getUuid().replace(/-/g, '').slice(0, 16);
   var customerId = ('cust' + deviceId.replace(/[^a-zA-Z0-9]/g, '')).slice(0, 40);
@@ -221,21 +179,20 @@ function handleCreatePaymentLink(e) {
       muteHttpExceptions: true
     });
   } catch (err) {
-    return jsonResponse({ status: 'error', message: 'Cashfree se contact nahi ho paya' });
+    return jsonResponse({ status: 'error', message: 'Could not reach the payment gateway' });
   }
 
   var order;
   try {
     order = JSON.parse(orderResponse.getContentText());
   } catch (err) {
-    return jsonResponse({ status: 'error', message: 'Cashfree se galat response mila' });
+    return jsonResponse({ status: 'error', message: 'Invalid response from the payment gateway' });
   }
 
   if (!order.payment_session_id) {
-    return jsonResponse({ status: 'error', message: 'Order nahi ban paya: ' + (order.message || JSON.stringify(order)) });
+    return jsonResponse({ status: 'error', message: 'Could not create order: ' + (order.message || JSON.stringify(order)) });
   }
 
-  // Persist the authoritative order details before exposing the checkout session.
   var saved = withLock(function () {
     var sheet = getOrCreateSheet('CashfreeOrders', CASHFREE_ORDERS_HEADERS);
     sheet.appendRow([safeCell(orderId), safeCell(deviceId), planType, amountRupees, Date.now(), 'created', safeCell(accountKey)]);
@@ -251,18 +208,13 @@ function handleCreatePaymentLink(e) {
   return jsonResponse({ status: 'ok', linkUrl: payUrl, linkId: orderId, planType: planType });
 }
 
-/**
- * Checks a Cashfree Order's status directly with Cashfree's servers and grants access if
- * it's really been paid and the amount matches the plan. Locked so two near-simultaneous
- * status checks for the same order can never both append an Activations row.
- */
 function handleCheckPayment(e) {
   var orderId = cleanInput(e.parameter.linkId, 100);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   var planType = cleanInput(e.parameter.planType, 20).toUpperCase();
 
   if (!orderId || !deviceId || !planType) {
-    return jsonResponse({ status: 'error', message: 'missing params' });
+    return jsonResponse({ status: 'error', message: 'Missing required parameters' });
   }
 
   var expectedAmountRupees = PLAN_AMOUNTS[planType];
@@ -274,9 +226,8 @@ function handleCheckPayment(e) {
   if (requestedAccount && !deviceOwnsAccount(requestedAccount, deviceId)) requestedAccount = '';
 
   return withLock(function () {
-    // The order must have been created by this backend for this exact device/plan/amount.
     var saved = findCashfreeOrder(orderId);
-    if (saved.row < 0) return jsonResponse({ status: 'error', message: 'Order nahi mila' });
+    if (saved.row < 0) return jsonResponse({ status: 'error', message: 'Order not found' });
     var savedDevice = String(saved.values[1]).trim();
     var savedPlan = String(saved.values[2]).trim().toUpperCase();
     var savedAmount = Number(saved.values[3]);
@@ -288,7 +239,6 @@ function handleCheckPayment(e) {
       return jsonResponse({ status: 'error', message: 'Please log in with the account used to create this order' });
     }
 
-    // Idempotency: never grant the same payment twice (e.g. if the app retries).
     var actSheet = getSheet('Activations');
     var existing = actSheet.getDataRange().getValues();
     for (var i = 1; i < existing.length; i++) {
@@ -309,20 +259,19 @@ function handleCheckPayment(e) {
         muteHttpExceptions: true
       });
     } catch (err) {
-      return jsonResponse({ status: 'error', message: 'Cashfree se contact nahi ho paya' });
+      return jsonResponse({ status: 'error', message: 'Could not reach the payment gateway' });
     }
 
     var order;
     try {
       order = JSON.parse(response.getContentText());
     } catch (err) {
-      return jsonResponse({ status: 'error', message: 'Cashfree se galat response mila' });
+      return jsonResponse({ status: 'error', message: 'Invalid response from the payment gateway' });
     }
 
     if (order.order_status !== 'PAID') {
-      return jsonResponse({ status: 'error', message: 'Payment abhi complete nahi hua (status: ' + (order.order_status || 'unknown') + ')' });
+      return jsonResponse({ status: 'error', message: 'Payment is incomplete (status: ' + (order.order_status || 'unknown') + ')' });
     }
-    // Compare exact server-stored amount and currency; accepting over/under-payments is unsafe.
     if (String(order.order_currency || '').toUpperCase() !== 'INR' ||
         !isFinite(Number(order.order_amount)) || Math.abs(Number(order.order_amount) - savedAmount) > 0.001) {
       return jsonResponse({ status: 'error', message: 'Payment amount or currency does not match the order' });
@@ -346,37 +295,18 @@ function handleCheckPayment(e) {
   });
 }
 
-
-/**
- * ---- Razorpay (in-app payment via Razorpay Android SDK) ----
- * Script Properties needed: RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET (Project Settings -> Script Properties).
- * The secret never goes into the app.
- *
- * Why a payment ALWAYS ends up as access:
- *  1. The app asks THIS script to create the order (price decided here, never by the app). The order
- *     is written to the "Orders" tab together with the device it belongs to BEFORE the payment
- *     screen even opens.
- *  2. After paying, the app asks us to confirm the order. We ask Razorpay itself whether it is paid
- *     (the app cannot fake that) and activate the plan.
- *  3. If anything goes wrong in between (app killed, no internet, phone restarted, app data
- *     cleared...), every normal status check tells the app "you have an unclaimed order", and the
- *     app then calls razorpaySync, which re-checks all this device's recent orders with Razorpay and
- *     activates every paid one. A paid order can only ever be activated once.
- */
 var RAZORPAY_PLANS = {
-  HOURLY12: { amount: 900, label: '12 Hour Access' },     // Rs 9
-  MONTHLY: { amount: 29900, label: '1 Month Access' },    // Rs 299
-  YEARLY: { amount: 99900, label: '1 Year Access' }       // Rs 999
+  HOURLY12: { amount: 900, label: '12 Hour Access' },
+  MONTHLY: { amount: 29900, label: '1 Month Access' },
+  YEARLY: { amount: 99900, label: '1 Year Access' }
 };
-// Every amount (paise) that activates a plan. The OLD prices stay listed on purpose, so an order that
-// was created before a price change is still honoured when it gets paid.
 var RAZORPAY_AMOUNT_TO_PLAN = {
   900: 'HOURLY12', 1000: 'HOURLY12',
   29900: 'MONTHLY', 30000: 'MONTHLY',
   99900: 'YEARLY', 100000: 'YEARLY'
 };
 var ORDERS_HEADERS = ['OrderId', 'DeviceId', 'Plan', 'AmountPaise', 'CreatedAt', 'Status'];
-var ORDERS_SCAN_ROWS = 300;                    // only the newest rows are ever scanned (keeps it fast)
+var ORDERS_SCAN_ROWS = 300;
 var ORDER_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 function razorpayKeys() {
@@ -387,7 +317,6 @@ function razorpayKeys() {
   return { id: id, secret: secret, auth: 'Basic ' + Utilities.base64Encode(id + ':' + secret) };
 }
 
-/** Newest ORDERS_SCAN_ROWS rows of the Orders tab as {row, orderId, deviceId, plan, createdAt, status}. */
 function recentOrders() {
   var sheet = getOrCreateSheet('Orders', ORDERS_HEADERS);
   var last = sheet.getLastRow();
@@ -418,8 +347,6 @@ function setOrderStatus(orderId, status) {
   }
 }
 
-/** True if this device has an order that is not activated/expired yet and is still young enough
- * to be worth re-checking. Cheap (reads the sheet only, never calls Razorpay). */
 function deviceHasUnclaimedOrders(deviceId) {
   try {
     var now = Date.now();
@@ -429,12 +356,10 @@ function deviceHasUnclaimedOrders(deviceId) {
       if (o.deviceId === deviceId && o.status !== 'activated' && o.status !== 'expired' && now - o.createdAt < ORDER_MAX_AGE_MS) return true;
     }
   } catch (err) {
-    // never let this optional hint break a normal status check
   }
   return false;
 }
 
-/** Latest non-revoked expiry for a device across the Activations tab: {expiryAt, planType}. */
 function latestActivationFor(deviceId) {
   var data = getSheet('Activations').getDataRange().getValues();
   var latestExpiry = 0;
@@ -453,7 +378,6 @@ function latestActivationFor(deviceId) {
   return { expiryAt: latestExpiry, planType: latestType };
 }
 
-/** App asks us to create the order, so the price can never be chosen by the app. */
 function handleRazorpayCreateOrder(e) {
   var planKey = cleanInput(e.parameter.plan, 20);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
@@ -486,38 +410,30 @@ function handleRazorpayCreateOrder(e) {
   }
 
   return withLock(function () {
-    // Written BEFORE the payment screen opens - this is what makes recovery possible later.
     getOrCreateSheet('Orders', ORDERS_HEADERS).appendRow([safeCell(order.id), safeCell(deviceId), planKey, plan.amount, Date.now(), 'created']);
     return jsonResponse({ status: 'ok', orderId: order.id, amount: order.amount, keyId: keys.id, planLabel: plan.label });
   });
 }
 
-/**
- * Activates one Razorpay order for a device. MUST be called with the script lock held.
- * Returns {ok, expiryAt, planType, message, orderStatus}. Safe to call any number of times: an order
- * is only ever activated once, and only ever for the device it was created for.
- */
 function activateRazorpayOrder(orderId, deviceId, keys, accountKey) {
   var actSheet = getSheet('Activations');
   var rows = actSheet.getDataRange().getValues();
 
-  // Already activated? (idempotency - the same paid order can never grant time twice)
   for (var i = 1; i < rows.length; i++) {
     if (String(rows[i][1]) === orderId) {
       var rowAcc = String(rows[i][6] == null ? '' : rows[i][6]).trim();
       var sameOwner = (rowAcc && accountKey) ? rowAcc === accountKey : String(rows[i][0]).trim() === deviceId;
       if (!sameOwner) {
-        return { ok: false, message: 'Ye payment kisi aur device par activate ho chuka hai', orderStatus: 'paid' };
+        return { ok: false, message: 'This payment is already activated on another device', orderStatus: 'paid' };
       }
       return { ok: true, expiryAt: Number(rows[i][3]), planType: rows[i][4] };
     }
   }
 
-  // An order created for one device can only be claimed by that device.
   var recent = recentOrders().list;
   for (var k = 0; k < recent.length; k++) {
     if (recent[k].orderId === orderId && recent[k].deviceId !== deviceId) {
-      return { ok: false, message: 'Ye order kisi aur device ka hai', orderStatus: 'foreign' };
+      return { ok: false, message: 'This order belongs to another device', orderStatus: 'foreign' };
     }
   }
 
@@ -528,39 +444,38 @@ function activateRazorpayOrder(orderId, deviceId, keys, accountKey) {
       muteHttpExceptions: true
     });
   } catch (err) {
-    return { ok: false, message: 'Razorpay se contact nahi ho paya', orderStatus: 'unreachable' };
+    return { ok: false, message: 'Could not reach Razorpay', orderStatus: 'unreachable' };
   }
   var order;
   try {
     order = JSON.parse(response.getContentText());
   } catch (err) {
-    return { ok: false, message: 'Razorpay se galat response mila', orderStatus: 'unreachable' };
+    return { ok: false, message: 'Invalid response from Razorpay', orderStatus: 'unreachable' };
   }
   if (response.getResponseCode() !== 200 || !order || order.id !== orderId) {
-    return { ok: false, message: 'Order nahi mila', orderStatus: 'unknown' };
+    return { ok: false, message: 'Order not found', orderStatus: 'unknown' };
   }
-  // SECURITY: ownership comes from the notes the SERVER wrote when it created the order - not from the
-  // newest-300-rows window of the Orders tab, which an attacker can push an old order out of.
+
   var owner = order.notes && order.notes.deviceId ? String(order.notes.deviceId).trim() : '';
   if (owner && owner !== deviceId) {
-    return { ok: false, message: 'Ye order kisi aur device ka hai', orderStatus: 'foreign' };
+    return { ok: false, message: 'This order belongs to another device', orderStatus: 'foreign' };
   }
   if (!owner) {
     var known = false;
-    for (var q = 0; q < recent.length; q++) { if (recent[q].orderId === orderId && recent[q].deviceId === deviceId) known = true; }
-    if (!known) return { ok: false, message: 'Order nahi mila', orderStatus: 'unknown' };
+    for (var q = 0; q < recent.length; q++) {
+      if (recent[q].orderId === orderId && recent[q].deviceId === deviceId) known = true;
+    }
+    if (!known) return { ok: false, message: 'Order not found', orderStatus: 'unknown' };
   }
   if (order.status !== 'paid' || Number(order.amount_paid) < Number(order.amount)) {
-    return { ok: false, message: 'Payment abhi complete nahi hua (status: ' + (order.status || 'unknown') + ')', orderStatus: order.status || 'unknown' };
+    return { ok: false, message: 'Payment is incomplete (status: ' + (order.status || 'unknown') + ')', orderStatus: order.status || 'unknown' };
   }
   var planType = RAZORPAY_AMOUNT_TO_PLAN[Number(order.amount)];
   var notedPlan = order.notes && order.notes.plan ? String(order.notes.plan).trim().toUpperCase() : '';
   if (!planType || order.currency !== 'INR' || (notedPlan && notedPlan !== planType)) {
-    return { ok: false, message: 'Payment amount ya plan order se match nahi karta', orderStatus: 'unknown' };
+    return { ok: false, message: 'Payment amount or plan does not match the order', orderStatus: 'unknown' };
   }
 
-  // Money-safety: extend from whichever is later - now or this device's current expiry - so a payment
-  // can only ever ADD time, never replace/shorten what is already paid for.
   var now = Date.now();
   var base = now;
   for (var j = 1; j < rows.length; j++) {
@@ -574,7 +489,7 @@ function activateRazorpayOrder(orderId, deviceId, keys, accountKey) {
   var expiryAt = grantExpiry(planType, base);
   ensureActivationAccountHeader(actSheet);
   actSheet.appendRow([safeCell(deviceId), safeCell(orderId), now, expiryAt, planType, false, safeCell(accountKey || '')]);
-  try { setOrderStatus(orderId, 'activated'); } catch (err) { /* the activation itself is what matters */ }
+  try { setOrderStatus(orderId, 'activated'); } catch (err) {}
   return { ok: true, expiryAt: expiryAt, planType: planType };
 }
 
@@ -582,7 +497,7 @@ function handleRazorpayVerify(e) {
   var orderId = cleanInput(e.parameter.orderId, 100);
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!orderId || !deviceId || !/^order_[A-Za-z0-9]+$/.test(orderId)) {
-    return jsonResponse({ status: 'error', message: 'missing params' });
+    return jsonResponse({ status: 'error', message: 'Missing required parameters' });
   }
   var keys = razorpayKeys();
   if (!keys) return jsonResponse({ status: 'error', message: 'Payment server is not configured' });
@@ -596,13 +511,9 @@ function handleRazorpayVerify(e) {
   });
 }
 
-/**
- * Safety net: re-checks every recent unclaimed order of this device with Razorpay and activates the
- * paid ones. Called by the app whenever a status check reports hasUnclaimed.
- */
 function handleRazorpaySync(e) {
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!deviceId) return jsonResponse({ status: 'error', message: 'missing deviceId' });
+  if (!deviceId) return jsonResponse({ status: 'error', message: 'Missing deviceId' });
   var keys = razorpayKeys();
   if (!keys) return jsonResponse({ status: 'error', message: 'Payment server is not configured' });
 
@@ -616,7 +527,7 @@ function handleRazorpaySync(e) {
       var o = list[i];
       if (o.deviceId === deviceId && o.status !== 'activated' && o.status !== 'expired' && now - o.createdAt < ORDER_MAX_AGE_MS) mine.push(o);
     }
-    mine.sort(function (a, b) { return a.createdAt - b.createdAt; }); // oldest first, so extensions stack in order
+    mine.sort(function (a, b) { return a.createdAt - b.createdAt; });
     mine = mine.slice(-5);
 
     var activated = 0;
@@ -626,8 +537,6 @@ function handleRazorpaySync(e) {
         activated++;
         continue;
       }
-      // Stop re-checking orders that were clearly never paid: an order nobody even tried to pay for
-      // after 2 hours, or one still unpaid after a day.
       var age = now - mine[m].createdAt;
       if ((r.orderStatus === 'created' && age > 2 * 60 * 60 * 1000) || (r.orderStatus !== 'unreachable' && age > 24 * 60 * 60 * 1000)) {
         setOrderStatus(mine[m].orderId, 'expired');
@@ -643,11 +552,9 @@ function grantExpiry(type, now) {
   if (type === 'FREE') return now + (100 * 365 * 24 * 60 * 60 * 1000);
   if (type === 'YEARLY') return now + (365 * 24 * 60 * 60 * 1000);
   if (type === 'HOURLY12') return now + (12 * 60 * 60 * 1000);
-  return now + (30 * 24 * 60 * 60 * 1000); // MONTHLY
+  return now + (30 * 24 * 60 * 60 * 1000);
 }
 
-/** Locked so two devices redeeming the same limited-use code at the exact same
- * instant can never both succeed and push its use count past the limit. */
 var REDEEM_MAX_FAILS_PER_DEVICE_PER_HOUR = 10;
 var REDEEM_MAX_FAILS_GLOBAL_PER_HOUR = 300;
 
@@ -655,7 +562,7 @@ function handleRedeem(e) {
   var code = cleanInput(e.parameter.code, 50).toUpperCase();
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   if (!code || !deviceId) {
-    return jsonResponse({ status: 'error', message: 'missing params' });
+    return jsonResponse({ status: 'error', message: 'Missing required parameters' });
   }
 
   var redeemAccount = optionalAccountKey(e);
@@ -681,10 +588,10 @@ function handleRedeem(e) {
       var active = row[4];
 
       if (active !== true && String(active).toUpperCase() !== 'TRUE') {
-        return jsonResponse({ status: 'error', message: 'Ye code disabled hai' });
+        return jsonResponse({ status: 'error', message: 'This code is disabled' });
       }
       if (maxUses > 0 && usedCount >= maxUses) {
-        return jsonResponse({ status: 'error', message: 'Is code ki limit khatam ho gayi' });
+        return jsonResponse({ status: 'error', message: 'This code has reached its usage limit' });
       }
 
       var now = Date.now();
@@ -707,14 +614,13 @@ function handleRedeem(e) {
 
 function handleCheck(e) {
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!deviceId) return jsonResponse({ status: 'error', message: 'missing deviceId' });
+  if (!deviceId) return jsonResponse({ status: 'error', message: 'Missing deviceId' });
 
   var accountKey = optionalAccountKey(e);
-  // The plan of an email can only be read by the device logged in for that email.
   if (accountKey && !deviceOwnsAccount(accountKey, deviceId)) accountKey = '';
 
   var latest = accountKey
-    ? withLockResult(function () { return latestActivationForAccount(deviceId, accountKey, true); })  // claims legacy rows
+    ? withLockResult(function () { return latestActivationForAccount(deviceId, accountKey, true); })
     : latestActivationForAccount(deviceId, '', false);
 
   var unclaimed = deviceHasUnclaimedOrders(deviceId);
@@ -722,22 +628,14 @@ function handleCheck(e) {
   return jsonResponse({ status: 'ok', expiryAt: latest.expiryAt, planType: latest.planType, hasUnclaimed: unclaimed });
 }
 
-/** Like withLock but returns the callback's raw value (withLock wraps HTTP responses). */
 function withLockResult(fn) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) throw new Error('Server is busy, try again in a moment');
   try { return fn(); } finally { lock.releaseLock(); }
 }
 
-/* ===================== PLAN <-> EMAIL BINDING =====================
- * Every new activation is stamped with the account (canonical email) in Activations column G.
- * A plan therefore follows the EMAIL: reinstall, new phone or factory reset - log in with the same
- * email (OTP) and the same plan comes back. Rows without an account are legacy rows that still
- * match by deviceId, and are claimed by the first verified account that checks from that device.
- * Only the device that is currently logged in for an email may read or use that email's plan. */
 var ACTIVATION_HEADERS = ['DeviceId', 'CodeOrOrder', 'ActivatedAt', 'ExpiryAt', 'PlanType', 'Revoked', 'Account'];
 
-/** Canonical account key for a request, or '' when the app sent no (or an invalid) email. */
 function optionalAccountKey(e) {
   var raw = cleanInput(e.parameter.email, 260);
   if (!raw) return '';
@@ -745,7 +643,6 @@ function optionalAccountKey(e) {
   return a ? a.key : '';
 }
 
-/** True only if this device is the one currently logged in (passed the OTP) for this account. */
 function deviceOwnsAccount(accountKey, deviceId) {
   if (!accountKey || !deviceId) return false;
   var sheet = getUsersSheet();
@@ -756,21 +653,19 @@ function deviceOwnsAccount(accountKey, deviceId) {
 
 function isRevokedCell(v) { return v === true || String(v).toUpperCase() === 'TRUE'; }
 
-/** Does this Activations row belong to the caller? Stamped rows belong to their account; legacy rows to their device. */
 function activationBelongs(row, deviceId, accountKey) {
   var rowAccount = String(row[6] == null ? '' : row[6]).trim();
   if (accountKey) {
     if (rowAccount) return rowAccount === accountKey;
-    return String(row[0]).trim() === deviceId;               // legacy row, same device
+    return String(row[0]).trim() === deviceId;
   }
-  return String(row[0]).trim() === deviceId && !rowAccount;  // old app without email: legacy behaviour
+  return String(row[0]).trim() === deviceId && !rowAccount;
 }
 
 function ensureActivationAccountHeader(sheet) {
   if (String(sheet.getRange(1, 7).getValue()).trim() === '') sheet.getRange(1, 7).setValue('Account');
 }
 
-/** Latest non-revoked expiry for the caller. Must run with the script lock held when backfill=true. */
 function latestActivationForAccount(deviceId, accountKey, backfill) {
   var sheet = getSheet('Activations');
   var data = sheet.getDataRange().getValues();
@@ -780,7 +675,7 @@ function latestActivationForAccount(deviceId, accountKey, backfill) {
     if (!activationBelongs(row, deviceId, accountKey)) continue;
     if (backfill && accountKey && !String(row[6] == null ? '' : row[6]).trim()) {
       ensureActivationAccountHeader(sheet);
-      sheet.getRange(i + 1, 7).setValue(safeCell(accountKey)); // claim the legacy row for this email
+      sheet.getRange(i + 1, 7).setValue(safeCell(accountKey));
       claimed = true;
     }
     if (isRevokedCell(row[5])) continue;
@@ -796,8 +691,6 @@ function jsonResponse(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-/** ---- Accounts: the Users tab (column A = canonical email, C = the one active device) ---- */
-
 function hashPin(pin) {
   var raw = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, pin);
   var hex = raw.map(function (b) {
@@ -809,43 +702,24 @@ function hashPin(pin) {
 }
 
 function getUsersSheet() {
-  // Auto-creates the Users tab (with headers) if it is missing - a missing tab was the cause of
-  // "Server error, please try again" on Send OTP.
   return getOrCreateSheet('Users', ['Email', 'PinHash', 'ActiveDeviceId', 'UpdatedAt', 'FailedAttempts', 'LockedUntil', 'TrialUsed', 'TrialStartedAt']);
 }
 
 function findUserRow(sheet, account) {
   var data = sheet.getDataRange().getValues();
   for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]).trim() === account) return i + 1; // 1-indexed sheet row
+    if (String(data[i][0]).trim() === account) return i + 1;
   }
   return -1;
 }
 
-/**
- * ---- Email + OTP login (free: the OTP is mailed from the Apps Script owner's Gmail) ----
- * Script Properties needed: none. The first run asks for the one-time "send email" permission
- * (run testEmailOtp once from the editor). See OTP_SETUP.md.
- *
- * The OTP is generated and checked only here on the server (kept 10 minutes in the script cache,
- * stored hashed). One email = one device: a correct OTP writes this device's id as the account's
- * ActiveDeviceId, so any other device logged in with that email is signed out the next time it
- * checks its session (handleCheckSession).
- *
- * Abuse protection: 60 s between OTPs per email, 5 per email per hour, 10 per device per hour,
- * a global cap for brand-new addresses, and the last 20 of the daily Gmail quota are reserved for
- * existing users. A wrong code is allowed 5 tries per OTP. The Users tab column A now holds the
- * canonical email (older rows keep their phone number and simply never match).
- */
 var OTP_TTL_SECONDS = 600;
 var OTP_MAX_VERIFY_ATTEMPTS = 5;
 var OTP_RESEND_COOLDOWN_SECONDS = 30;
 var OTP_MAX_PER_EMAIL_PER_HOUR = 5;
 var OTP_MAX_PER_DEVICE_PER_HOUR = 10;
-var OTP_MAX_GLOBAL_PER_6H = 30;        // brand-new addresses
-var OTP_MAX_KNOWN_PER_6H = 100;        // addresses that already have an account
-// Gmail allows only ~100 script emails a day (Workspace ~1500). The last few are kept for people who
-// ALREADY have an account, so a flood of fake new addresses can never lock real users out.
+var OTP_MAX_GLOBAL_PER_6H = 30;
+var OTP_MAX_KNOWN_PER_6H = 100;
 var OTP_UNKNOWN_QUOTA_RESERVE = 20;
 
 function otpHash(account, otp) {
@@ -870,15 +744,8 @@ function bumpCounter(cache, key, ttlSeconds) {
   cache.put(key, String(readCounter(cache, key) + 1), ttlSeconds);
 }
 
-// ---------------------------------------------------------------------------------------------
-// Email identity
-// ---------------------------------------------------------------------------------------------
-
-// Plain, linear-time pattern (no nested quantifiers) and the input is length-capped before it runs.
 var EMAIL_RE = /^[a-z0-9._%+\-]{1,64}@([a-z0-9\-]+\.)+[a-z]{2,24}$/;
 
-// Throw-away mailbox services. Not complete (new ones appear daily) - it only raises the bar for
-// someone farming free trials with disposable addresses.
 var DISPOSABLE_DOMAINS = {
   'mailinator.com': 1, 'guerrillamail.com': 1, 'guerrillamail.net': 1, 'guerrillamail.org': 1, 'sharklasers.com': 1,
   '10minutemail.com': 1, '10minutemail.net': 1, 'tempmail.com': 1, 'temp-mail.org': 1, 'tempmailo.com': 1,
@@ -887,7 +754,6 @@ var DISPOSABLE_DOMAINS = {
   'emailondeck.com': 1, 'tempail.com': 1, 'moakt.com': 1, 'mailnesia.com': 1, 'burnermail.io': 1
 };
 
-// More throw-away services + sub-domain matching (abc@x.yopmail.com counts as yopmail.com).
 'guerrillamail.biz guerrillamail.de grr.la guerrillamailblock.com 10minutemail.org temp-mail.io tempmail.net tempail.com yopmail.fr dispostable.com fakeinbox.com maildrop.cc mailnesia.com mintemail.com mohmal.com emailondeck.com spamgourmet.com mytemp.email burnermail.io anonbox.net dropmail.me discard.email moakt.com mailcatch.com tmail.ws tmpmail.org tmpmail.net 1secmail.com 1secmail.net 1secmail.org inboxkitten.com harakirimail.com mail.tm mailsac.com spambox.us trbvm.com emailfake.com fakemail.net crazymailing.com gufum.com mailpoof.com tempinbox.com jetable.org owlymail.com cuvox.de tempr.email email-temp.com temporary-mail.net tempm.com fexpost.com smailpro.com emltmp.com mail-temp.com mailforspam.com trashmail.net trashmail.de'.split(' ').forEach(function (d) { DISPOSABLE_DOMAINS[d] = 1; });
 function isDisposableDomain(domain) {
   var parts = String(domain || '').toLowerCase().split('.');
@@ -897,17 +763,6 @@ function isDisposableDomain(domain) {
   return false;
 }
 
-
-/**
- * Returns {display, key, domain} or null.
- *  display = what the user typed (lower-cased) - the OTP is mailed here.
- *  key     = the canonical account id. Two spellings of the SAME inbox must be the same account, otherwise
- *            one person could farm unlimited free trials / extra logins:
- *            - "+tag" is dropped for the app's account-alias policy
- *            - Gmail ignores dots     (r.a.h.u.l@gmail.com == rahul@gmail.com), googlemail.com == gmail.com
- *            Note: dropping +tags for non-Gmail providers is an app-level alias policy, not a universal
- *            email-provider guarantee. Change this only together with the client/account migration.
- */
 function normalizeEmail(raw) {
   var s = String(raw == null ? '' : raw).trim().toLowerCase();
   if (s.length < 6 || s.length > 254 || !EMAIL_RE.test(s)) return null;
@@ -927,7 +782,6 @@ function normalizeEmail(raw) {
   return { display: s, key: base + '@' + canonDomain, domain: canonDomain };
 }
 
-/** Reads the `email` parameter. Returns {error: <response>} or the normalized account. */
 function parseAccount(e) {
   var raw = cleanInput(e.parameter.email, 260);
   if (!raw) {
@@ -941,7 +795,6 @@ function parseAccount(e) {
   return acct;
 }
 
-/** Sends the OTP from the Apps Script owner's Gmail. Returns true if Gmail accepted it. */
 function sendOtpEmail(to, otp) {
   try {
     MailApp.sendEmail({
@@ -955,13 +808,11 @@ function sendOtpEmail(to, otp) {
     });
     return true;
   } catch (err) {
-    console.error('OTP email failed: ' + err);      // never log the address itself
+    console.error('OTP email failed: ' + err);
     return false;
   }
 }
 
-/** Run once from the Apps Script editor (put your own address in): it also triggers the one-time
- * "allow this script to send email" permission prompt, which the deployed web app needs. */
 function testEmailOtp() {
   var ok = sendOtpEmail('PUT_YOUR_EMAIL_HERE@gmail.com', '123456');
   Logger.log(ok ? 'Sent - check the inbox (and spam). Emails left today: ' + MailApp.getRemainingDailyQuota()
@@ -972,7 +823,7 @@ function handleSendOtp(e) {
   var acct = parseAccount(e);
   if (acct.error) return acct.error;
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!deviceId) return jsonResponse({ status: 'error', message: 'missing params' });
+  if (!deviceId) return jsonResponse({ status: 'error', message: 'Missing required parameters' });
   if (isDisposableDomain(acct.domain)) {
     return jsonResponse({ status: 'error', message: 'Please use your permanent email address (temporary mail services are not allowed)' });
   }
@@ -996,9 +847,7 @@ function handleSendOtp(e) {
     if (readCounter(cache, 'otpcnt_d_' + deviceId) >= OTP_MAX_PER_DEVICE_PER_HOUR) {
       return jsonResponse({ status: 'error', message: 'Too many OTP requests from this device. Try again after some time.' });
     }
-    // Two tiers: unknown addresses share a small pool, existing customers have their own reserve - so a
-    // flood of fake addresses (rotating deviceIds) cannot lock real, registered users out of logging in.
-    // Cache "known user" so most requests skip the (slow) sheet read. Only positives are cached.
+
     var known = cache.get('known_' + acct.key) === '1';
     if (!known) {
       known = findUserRow(getUsersSheet(), acct.key) !== -1;
@@ -1061,10 +910,8 @@ function handleVerifyOtp(e) {
       return jsonResponse({ status: 'error', message: 'Wrong OTP (' + (OTP_MAX_VERIFY_ATTEMPTS - rec.attempts) + ' tries left)' });
     }
 
-    cache.remove(otpKey); // one-time: this OTP can never be used again
+    cache.remove(otpKey);
 
-    // Correct OTP - this device becomes the one and only active device for this email.
-    // (Whatever device was logged in before is signed out the next time it checks its session.)
     var sheet = getUsersSheet();
     var rowNum = findUserRow(sheet, acct.key);
     if (rowNum === -1) {
@@ -1080,7 +927,7 @@ function handleCheckSession(e) {
   var acct = parseAccount(e);
   if (acct.error) return acct.error;
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!deviceId) return jsonResponse({ status: 'error', message: 'missing params' });
+  if (!deviceId) return jsonResponse({ status: 'error', message: 'Missing required parameters' });
 
   var sheet = getUsersSheet();
   var rowNum = findUserRow(sheet, acct.key);
@@ -1090,30 +937,14 @@ function handleCheckSession(e) {
   return jsonResponse({ status: 'ok', active: String(activeDeviceId) === deviceId });
 }
 
-/**
- * Grants the one-time 24-hour free trial for a phone number - checked and recorded here on
- * the server (Users sheet columns G/H: TrialUsed, TrialStartedAt), NOT just on the phone
- * itself. A purely on-device trial flag gets wiped the instant someone uninstalls and
- * reinstalls the app, letting the same phone number claim endless "free 24 hours" - keying it
- * to the phone number's row on the server instead closes that off completely, since the
- * phone number (and its login) is what survives a reinstall, not anything stored locally.
- * Locked so two rapid taps (or two devices) can never both start a trial for the same number.
- */
 var TRIAL_MS = 24 * 60 * 60 * 1000;
 var TRIAL_DEVICE_HEADERS = ['DeviceId', 'Account', 'StartedAt'];
 
-/**
- * Starts the 24-hour free trial. Strict rules, all checked here on the server (never on the phone):
- *  - once per phone number (Users tab)
- *  - once per device (TrialDevices tab) - a second SIM / number on the same phone does not get another one
- *  - if the number's trial is still running (e.g. after a reinstall or a new login), it is simply
- *    RESUMED with its original start time - it is never restarted or extended.
- */
 function handleStartTrial(e) {
   var acct = parseAccount(e);
   if (acct.error) return acct.error;
   var deviceId = cleanInput(e.parameter.deviceId, 200);
-  if (!deviceId) return jsonResponse({ status: 'error', message: 'missing params' });
+  if (!deviceId) return jsonResponse({ status: 'error', message: 'Missing required parameters' });
 
   return withLock(function () {
     var sheet = getUsersSheet();
@@ -1121,8 +952,6 @@ function handleStartTrial(e) {
     var rowNum = findUserRow(sheet, acct.key);
     var now = Date.now();
 
-    // SECURITY: a trial may only be started by the device that just passed the email OTP for this account.
-    // Rows in Users are only ever created by handleVerifyOtp, so an unverified address has no row.
     if (rowNum === -1 || String(sheet.getRange(rowNum, 3).getValue()).trim() !== deviceId) {
       return jsonResponse({ status: 'error', message: 'Please log in with OTP first' });
     }
@@ -1139,7 +968,6 @@ function handleStartTrial(e) {
       return jsonResponse({ status: 'error', message: 'Free trial already used on this account', startedAt: started });
     }
 
-    // This account is new to the trial - but has THIS DEVICE already had one (with any email)?
     var devData = devSheet.getDataRange().getValues();
     for (var i = 1; i < devData.length; i++) {
       if (String(devData[i][0]).trim() === deviceId) {
@@ -1157,15 +985,12 @@ function handleStartTrial(e) {
   });
 }
 
-/** Lets a freshly installed / newly logged-in app learn whether this account already has a trial. */
 function handleTrialInfo(e) {
   var acct = parseAccount(e);
   if (acct.error) return acct.error;
   var deviceId = cleanInput(e.parameter.deviceId, 200);
   var sheet = getUsersSheet();
   var rowNum = findUserRow(sheet, acct.key);
-  // SECURITY: identical answer for unknown accounts and for callers that are not this account's
-  // logged-in device, so the endpoint cannot be used to discover who has an account / trial.
   if (rowNum === -1 || !deviceId || String(sheet.getRange(rowNum, 3).getValue()).trim() !== deviceId) {
     return jsonResponse({ status: 'ok', used: false });
   }
@@ -1175,31 +1000,22 @@ function handleTrialInfo(e) {
   return jsonResponse({ status: 'ok', used: true, startedAt: Number(row[7]) || 0 });
 }
 
-
-/** Run from the editor to see the REAL error behind "Server error": Run -> debugSendOtp -> View logs. */
 function debugSendOtp() {
   var out = doGet({ parameter: { action: 'sendOtp', email: 'PUT_YOUR_EMAIL_HERE@gmail.com', deviceId: 'debug-device' } });
   Logger.log(out.getContent());
   getUsersSheet(); CacheService.getScriptCache(); Logger.log('Quota left: ' + MailApp.getRemainingDailyQuota());
 }
 
-
-/** RUN THIS ONCE from the editor (Run -> authorizeAll) and click Allow on every prompt.
- * It asks Google for ALL permissions the web app needs (Sheets, Gmail send, external requests),
- * which fixes "You do not have permission to call SpreadsheetApp.getActiveSpreadsheet". */
 function authorizeAll() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   Logger.log('Sheet: ' + (ss ? ss.getName() : 'NULL - script is not bound to a Sheet!'));
   Logger.log('Mail quota left: ' + MailApp.getRemainingDailyQuota());
-  UrlFetchApp.getRequest('https://example.com');   // only builds a request (no network call) - triggers the permission
+  UrlFetchApp.getRequest('https://example.com');
   CacheService.getScriptCache().put('auth_test', '1', 60);
   LockService.getScriptLock();
   Logger.log('All permissions granted. Now: Deploy -> Manage deployments -> pencil -> New version -> Deploy.');
 }
 
-
-/** SPEED: run setupKeepWarm ONCE from the editor. It adds a free 5-minute trigger that keeps the
- * web app "warm", so Send OTP no longer pays a slow cold start after the script has been idle. */
 function keepWarm() { CacheService.getScriptCache().get('ping'); }
 function setupKeepWarm() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
