@@ -1001,7 +1001,7 @@ function handleTrialInfo(e) {
 }
 
 function debugSendOtp() {
-  var out = doGet({ parameter: { action: 'sendOtp', email: 'PUT_YOUR_EMAIL_HERE@gmail.com', deviceId: 'debug-device' } });
+  var out = doGet({ parameter: { action: 'sendOtp', email: 'kamleshshinde4748@gmail.com', deviceId: 'debug-device' } });
   Logger.log(out.getContent());
   getUsersSheet(); CacheService.getScriptCache(); Logger.log('Quota left: ' + MailApp.getRemainingDailyQuota());
 }
