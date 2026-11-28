@@ -7,7 +7,7 @@ package com.autodialer.app
 object NumberParser {
 
     private val plainRun = Regex("(?<!\\d)\\+?\\d{10,13}(?!\\d)")
-    private val spaced = Regex("(?<!\\d)(\\+?\\d[\\d\\-\\s.()]{8,15}\\d)(?!\\d)")
+    private val spaced = Regex("(?<!\\d)(\\+?\\d[\\d\\-\\s.()]{8,18}\\d)(?!\\d)")
     private val dateLike = Regex("^\\d{1,4}[-/.]\\d{1,2}[-/.]\\d{2,4}$")
     private val separators = Regex("[\\s\\-.()]")
 
@@ -60,7 +60,7 @@ object NumberParser {
             if (!PhoneUtils.isValidDialableNumber(token)) return@mapIndexedNotNull null
             val finalLabel = when {
                 !label.isNullOrBlank() && candidates.size == 1 -> label
-                !label.isNullOrBlank() -> "$label ${i + 1}"
+                !label.isNullOrBlank() -> "$label${i + 1}"
                 else -> "Lead ${startIndex + i}"
             }
             Lead(finalLabel, token)
