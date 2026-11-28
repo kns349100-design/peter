@@ -513,14 +513,15 @@ class MainActivity : AppCompatActivity(), CallEngineListener {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (missingPermissions.isNotEmpty()) {
+            val permPrefs = SecurePrefs.open(this, "perm_prefs")
             val permanentlyDenied = missingPermissions.any {
                 !ActivityCompat.shouldShowRequestPermissionRationale(this, it)
-            } && getSharedPreferences("perm_prefs", Context.MODE_PRIVATE).getBoolean("asked_once", false)
+            } && permPrefs.getBoolean("asked_once", false)
 
             if (permanentlyDenied) {
                 showPermissionSettingsDialog()
             } else {
-                getSharedPreferences("perm_prefs", Context.MODE_PRIVATE).edit().putBoolean("asked_once", true).apply()
+                permPrefs.edit().putBoolean("asked_once", true).apply()
                 requestNeededPermissions()
                 showToast("Phone and Call State permissions are required.")
             }
