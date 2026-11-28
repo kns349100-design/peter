@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.autodialer.app.databinding.ActivitySubscriptionBinding
@@ -23,6 +24,7 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
     private var lastPaymentId: String? = null
     private var checkoutOpen = false
     private var confirming = false
+    private var lastClickMs = 0L
     private val slowHintHandler = Handler(Looper.getMainLooper())
     private var slowHintRunnable: Runnable? = null
 
@@ -38,6 +40,7 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
         restorePendingPaymentIfAny()
 
         binding.btnFreeTrial.setOnClickListener {
+            if (!allowClick()) return@setOnClickListener
             binding.btnFreeTrial.isEnabled = false
             val email = AuthManager(this).email()
             subscriptionManager.startFreeTrial(email) { success, message ->
@@ -48,27 +51,28 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
             }
         }
         binding.btnPay12Hour.setOnClickListener {
-            startRazorpayPayment("HOURLY12", 9, "12 Hour Access")
+            if (allowClick()) startRazorpayPayment("HOURLY12", 9, "12 Hour Access")
         }
         binding.btnPayMonthly.setOnClickListener {
-            startRazorpayPayment("MONTHLY", 299, "1 Month Access")
+            if (allowClick()) startRazorpayPayment("MONTHLY", 299, "1 Month Access")
         }
         binding.btnPayYearly.setOnClickListener {
-            startRazorpayPayment("YEARLY", 999, "1 Year Access")
+            if (allowClick()) startRazorpayPayment("YEARLY", 999, "1 Year Access")
         }
         binding.btnCheckPayment.setOnClickListener {
-            sendPaymentProofOnWhatsApp()
+            if (allowClick()) sendPaymentProofOnWhatsApp()
         }
 
         binding.btnRedeem.setOnClickListener {
+            if (!allowClick()) return@setOnClickListener
             val code = binding.etCode.text.toString()
             if (code.isBlank()) {
-                binding.tvRedeemResult.text = "Enter a code"
+                binding.tvRedeemResult.text = "Enter a promo code."
                 return@setOnClickListener
             }
             binding.btnRedeem.isEnabled = false
-            binding.tvRedeemResult.text = "Checking..."
-            startSlowHint(binding.tvRedeemResult, "Still checking - the server can take a few extra seconds, hang on...")
+            binding.tvRedeemResult.text = "Verifying code..."
+            startSlowHint(binding.tvRedeemResult, "Still verifying — the server is waking up, please wait...")
             subscriptionManager.redeemCode(code) { success, message, planType ->
                 cancelSlowHint()
                 binding.btnRedeem.isEnabled = true
@@ -87,12 +91,13 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
         refreshUi()
     }
 
-    /**
-     * Creates a Razorpay order on the server, then opens Razorpay Checkout inside the app. On a
-     * phone it lists the installed UPI apps (PhonePe / GPay / Paytm...) to pay with directly -
-     * no QR code. Once paid, the license backend asks Razorpay itself whether the order is
-     * really paid before activating the plan.
-     */
+    private fun allowClick(debounceMs: Long = 500L): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastClickMs < debounceMs) return false
+        lastClickMs = now
+        return true
+    }
+
     private fun startRazorpayPayment(planType: String, amountRupees: Int, planLabel: String) {
         if (checkoutOpen || confirming) return
         setPayButtonsEnabled(false)
@@ -108,8 +113,6 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
             pendingAmountRupees = amountRupees
             pendingOrderId = order.orderId
             lastPaymentId = null
-            // Persisted immediately so that if Android kills this screen while the user is in
-            // their UPI app, coming back still finds and confirms the payment.
             subscriptionManager.savePendingPayment(planType, amountRupees, System.currentTimeMillis(), order.orderId)
             openCheckout(order, planLabel)
         }
@@ -131,13 +134,13 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
             }
             options.put("theme", JSONObject().put("color", "#1A56DB"))
             checkoutOpen = true
-            binding.tvPaymentResult.text = "Complete the payment in the payment screen."
+            binding.tvPaymentResult.text = "Complete the payment in the checkout window."
             binding.btnCheckPayment.visibility = android.view.View.VISIBLE
             checkout.open(this, options)
         } catch (e: Exception) {
             checkoutOpen = false
             setPayButtonsEnabled(true)
-            Toast.makeText(this, "Could not open payment screen", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Unable to open payment checkout.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -150,31 +153,24 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
     override fun onPaymentError(code: Int, response: String?, paymentData: PaymentData?) {
         checkoutOpen = false
         setPayButtonsEnabled(true)
-        binding.tvPaymentResult.text = "Payment cancelled or failed. If money was deducted, it will be confirmed automatically - or use the WhatsApp button below."
+        binding.tvPaymentResult.text = "Payment cancelled or failed. If money was deducted, it will be activated automatically — or contact support via WhatsApp below."
         binding.btnCheckPayment.visibility = android.view.View.VISIBLE
     }
 
-    /** Asks the backend to confirm the pending order with Razorpay and activates the plan.
-     * quiet = true is used for silent recovery when the screen is reopened - it never shows an
-     * error for an order that simply was never paid. Safe to repeat: the server grants an order
-     * only once. */
     private fun confirmPendingPayment(quiet: Boolean, attempt: Int = 0) {
         val orderId = pendingOrderId ?: return
         if (confirming) return
         confirming = true
         if (!quiet) {
             binding.tvPaymentResult.text = "Confirming your payment..."
-            startSlowHint(binding.tvPaymentResult, "Still confirming - the server can take a few extra seconds, hang on...")
+            startSlowHint(binding.tvPaymentResult, "Still confirming — the server is waking up, please wait...")
         }
         subscriptionManager.confirmRazorpayPayment(orderId) { success, planType, message ->
             cancelSlowHint()
-            // The payment already went through at this point - so if confirming it fails (no
-            // network for a moment, the server is slow to wake up, Razorpay hasn't marked the
-            // order paid yet), keep trying on our own a few times instead of making the customer
-            // do anything. Anything still unconfirmed after that is picked up automatically later.
-            val retryable = !success && !quiet && attempt < 3 && !message.contains("kisi aur device")
+            val retryable = !success && !quiet && attempt < 3 &&
+                !message.contains("another device", ignoreCase = true)
             if (retryable) {
-                binding.tvPaymentResult.text = "Confirming your payment... (try ${attempt + 2} of 4)"
+                binding.tvPaymentResult.text = "Confirming your payment (attempt ${attempt + 2} of 4)..."
                 slowHintHandler.postDelayed({
                     confirming = false
                     if (!isFinishing && !isDestroyed) confirmPendingPayment(quiet = false, attempt = attempt + 1)
@@ -189,14 +185,14 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
                 pendingOrderId = null
                 pendingPlanType = null
                 binding.btnCheckPayment.visibility = android.view.View.GONE
-                binding.tvPaymentResult.text = "Payment confirmed!"
+                binding.tvPaymentResult.text = "Payment confirmed."
                 refreshUi()
                 showCongratulationsDialog(planType, amount)
             } else {
                 binding.tvPaymentResult.text = if (quiet) {
-                    "Last payment not confirmed yet. If money was deducted, it activates automatically - or use the WhatsApp button below."
+                    "Last payment is still pending confirmation. If money was deducted, it will activate automatically — or contact support via WhatsApp below."
                 } else {
-                    "$message\nIf money was deducted, it will activate automatically - or use the WhatsApp button below."
+                    "$message\nIf money was deducted, it will activate automatically — or contact support via WhatsApp below."
                 }
                 binding.btnCheckPayment.visibility = android.view.View.VISIBLE
             }
@@ -209,24 +205,19 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
         binding.btnPayYearly.isEnabled = enabled
     }
 
-    /** If a payment was started but never confirmed (screen killed while in the UPI app, or the
-     * app was closed and reopened), pick it back up instead of silently losing track of it. */
     private fun restorePendingPaymentIfAny() {
         val pending = subscriptionManager.loadPendingPayment() ?: return
         if (!pending.reference.startsWith("order_")) {
-            // Leftover from the old UPI/SMS flow - not a Razorpay order, nothing to confirm.
             subscriptionManager.clearPendingPayment()
             return
         }
         pendingPlanType = pending.planType
         pendingAmountRupees = pending.amountRupees
         pendingOrderId = pending.reference
-        binding.tvPaymentResult.text = "Checking your last payment..."
+        binding.tvPaymentResult.text = "Checking your recent payment..."
         binding.btnCheckPayment.visibility = android.view.View.VISIBLE
     }
 
-    /** Clear confirmation of exactly what was bought - plan name, price paid, and the exact
-     * date/time it now runs out - so there's never any ambiguity about what a payment got. */
     private fun showCongratulationsDialog(planType: String, amountRupees: Int?) {
         val (planName, priceLabel) = subscriptionManager.planDisplayInfo(planType)
         val expiryLabel = subscriptionManager.expiryDateLabel()
@@ -257,8 +248,6 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
         dialog.show()
     }
 
-    /** Opens WhatsApp to the admin's number with the payment/order IDs pre-filled, so a
-     * payment that didn't auto-activate can be sorted out quickly. */
     private fun sendPaymentProofOnWhatsApp() {
         val message = "Hi, I've paid for CallConnect. Order: ${pendingOrderId ?: "-"}, Payment: ${lastPaymentId ?: "-"}. Please activate my plan."
         val encodedMessage = java.net.URLEncoder.encode(message, "UTF-8")
@@ -266,24 +255,19 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
         } catch (e: Exception) {
-            Toast.makeText(this, "WhatsApp not found", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "WhatsApp is not installed on this device.", Toast.LENGTH_SHORT).show()
         }
     }
 
-    /** After successfully activating any plan (free trial started, payment verified, or a
-     * code redeemed) - go straight into the app instead of leaving the user sitting on the
-     * plan screen. Short delay so they can actually see the confirmation message first. */
     private fun goToMainAfterDelay(delayMs: Long = 1200) {
         slowHintHandler.postDelayed({
             if (!isFinishing && !isDestroyed) {
-                startActivity(android.content.Intent(this, MainActivity::class.java))
+                startActivity(Intent(this, MainActivity::class.java))
                 finish()
             }
         }, delayMs)
     }
 
-    /** Shows a reassuring message if the backend hasn't responded within a few seconds
-     * (the free backend can be genuinely slow to "wake up" after being idle). */
     private fun startSlowHint(target: android.widget.TextView, message: String) {
         cancelSlowHint()
         val runnable = Runnable { target.text = message }
@@ -317,11 +301,9 @@ class SubscriptionActivity : AppCompatActivity(), PaymentResultWithDataListener 
                 val hoursLeft = subscriptionManager.trialMillisRemaining() / (1000 * 60 * 60)
                 "${hoursLeft}h left in trial"
             }
-            subscriptionManager.hasStartedFreeTrial() -> "Trial expired - subscribe to continue"
-            else -> "Pick a plan below to get started"
+            subscriptionManager.hasStartedFreeTrial() -> "Trial expired — subscribe to continue"
+            else -> "Select a plan below to get started"
         }
-        // The free trial is a one-time offer - hide it from the list once it's been used,
-        // whether it's still running or already expired.
         binding.btnFreeTrial.visibility =
             if (subscriptionManager.hasStartedFreeTrial()) android.view.View.GONE else android.view.View.VISIBLE
         binding.tvDeviceId.text = "Device ID: ${subscriptionManager.deviceId()}"
