@@ -4,6 +4,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -13,12 +15,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * "Dashboard" - shows every call made TODAY, straight from the call log, so it's always
- * accurate even after a list finishes and auto-clears mid-day (a new list can be loaded
- * right after, and this still shows all of today's calls combined). Once the day rolls
- * over, that date's calls move over to a proper sheet under "Sheets" instead.
- */
 class HistoryActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityHistoryBinding
@@ -26,6 +22,7 @@ class HistoryActivity : AppCompatActivity() {
     private lateinit var outcomeStore: OutcomeStore
     private lateinit var adapter: CallLogAdapter
     private var displayToStorageIndex: List<Int> = emptyList()
+    private var lastClickMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,9 +35,9 @@ class HistoryActivity : AppCompatActivity() {
         adapter = CallLogAdapter(
             mutableListOf(),
             outcomeStore,
-            onDelete = { position -> confirmDeleteRow(position) },
-            onToggleCollected = { position -> toggleCollected(position) },
-            onCall = { position -> callFromDashboard(position) }
+            onDelete = { position -> if (allowClick()) confirmDeleteRow(position) },
+            onToggleCollected = { position -> if (allowClick(250L)) toggleCollected(position) },
+            onCall = { position -> if (allowClick()) callFromDashboard(position) }
         )
         binding.rvHistory.layoutManager = LinearLayoutManager(this)
         binding.rvHistory.adapter = adapter
@@ -48,16 +45,21 @@ class HistoryActivity : AppCompatActivity() {
         loadToday()
     }
 
-    /** Places a single, one-off call straight from the Dashboard - completely separate from
-     * the autodialer sequence (doesn't touch the loaded list, its statuses, or the
-     * already-called exclusion list), so there's no risk of this interfering with the main
-     * calling flow. Falls back to opening the dialer (one extra tap) if call permission
-     * somehow isn't granted, rather than silently failing. */
+    private fun allowClick(debounceMs: Long = 450L): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastClickMs < debounceMs) return false
+        lastClickMs = now
+        return true
+    }
+
     private fun callFromDashboard(displayPosition: Int) {
         val storageIndex = displayToStorageIndex.getOrNull(displayPosition) ?: return
         val entry = store.loadDay(store.todayKey()).getOrNull(storageIndex) ?: return
-        val phone = entry.phone
-        if (phone.isBlank()) return
+        val phone = entry.phone.trim()
+        if (!PhoneUtils.isValidDialableNumber(phone)) {
+            Toast.makeText(this, "Invalid phone number.", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         val hasPermission = ContextCompat.checkSelfPermission(this, android.Manifest.permission.CALL_PHONE) ==
             PackageManager.PERMISSION_GRANTED
@@ -69,7 +71,7 @@ class HistoryActivity : AppCompatActivity() {
         try {
             startActivity(intent)
         } catch (e: Exception) {
-            android.widget.Toast.makeText(this, "Could not start a call", android.widget.Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Unable to place the call.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -91,9 +93,8 @@ class HistoryActivity : AppCompatActivity() {
 
         val todayLabel = SimpleDateFormat("dd MMM yyyy, EEEE", Locale.getDefault()).format(Date())
         binding.tvHistorySummary.text =
-            "Today - $todayLabel\nTotal calls: ${entries.size}   $perOutcomeSummary   Untagged: $untagged"
+            "Today — $todayLabel\nTotal calls: ${entries.size}   $perOutcomeSummary   Untagged: $untagged"
 
-        // Most recent call first.
         val indexed = entries.withIndex().toList()
         val sorted = indexed.sortedByDescending { it.value.time }
         displayToStorageIndex = sorted.map { it.index }
@@ -109,7 +110,7 @@ class HistoryActivity : AppCompatActivity() {
     private fun confirmDeleteRow(displayPosition: Int) {
         val storageIndex = displayToStorageIndex.getOrNull(displayPosition) ?: return
         AlertDialog.Builder(this)
-            .setTitle("Delete this call record?")
+            .setTitle("Delete call record?")
             .setMessage("This action cannot be undone.")
             .setPositiveButton("Delete") { _, _ ->
                 store.deleteEntry(store.todayKey(), storageIndex)
